@@ -1,0 +1,87 @@
+/* LiveHear Unified Design Tokens */
+:root {
+  /* Common Palette */
+  --color-primary: #007aff;
+  --color-primary-hover: #0062cc;
+  --color-primary-subtle: rgba(0, 122, 255, 0.12);
+  --color-success: #34c759;
+  --color-warning: #ff9500;
+  --color-danger: #ff3b30;
+  
+  /* Shared Timing */
+  --transition-fast: 120ms cubic-bezier(0.16, 1, 0.3, 1);
+  --transition-base: 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  --transition-spring: 380ms cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+/* ==========================================================================
+   macOS Apple HIG Theme Definition
+   ========================================================================== */
+[data-platform="macos"] {
+  --font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", sans-serif;
+  --font-mono: "SF Mono", Menlo, Monaco, Courier, monospace;
+  
+  /* Glass Vibrancy Materials (Dark Mode Default) */
+  --bg-window: rgba(28, 28, 32, 0.76);
+  --bg-window-solid: #1c1c20;
+  --bg-card: rgba(255, 255, 255, 0.06);
+  --bg-card-hover: rgba(255, 255, 255, 0.10);
+  --bg-card-active: rgba(255, 255, 255, 0.14);
+  --bg-input: rgba(0, 0, 0, 0.25);
+  
+  --backdrop-blur: blur(28px) saturate(180%);
+  --border-window: 1px solid rgba(255, 255, 255, 0.14);
+  --border-subtle: 1px solid rgba(255, 255, 255, 0.08);
+  
+  /* macOS Radii */
+  --radius-window: 14px;
+  --radius-card: 10px;
+  --radius-button: 6px;
+  --radius-pill: 9999px;
+  
+  /* macOS Shadows */
+  --shadow-window: 0 20px 48px rgba(0, 0, 0, 0.45), 0 4px 12px rgba(0, 0, 0, 0.2);
+  --shadow-card: 0 4px 16px rgba(0, 0, 0, 0.2);
+  
+  /* Typography Colors */
+  --text-primary: rgba(255, 255, 255, 0.94);
+  --text-secondary: rgba(255, 255, 255, 0.60);
+  --text-tertiary: rgba(255, 255, 255, 0.38);
+  --text-accent: #388bfd;
+}
+
+/* ==========================================================================
+   Windows 11 Fluent Design System Theme Definition
+   ========================================================================== */
+[data-platform="windows"] {
+  --font-family: "Segoe UI Variable Text", "Segoe UI Variable Display", "Segoe UI", Tahoma, sans-serif;
+  --font-mono: "Cascadia Code", Consolas, monospace;
+  
+  /* Acrylic / Mica Materials (Dark Mode) */
+  --bg-window: rgba(32, 32, 36, 0.88);
+  --bg-window-solid: #202024;
+  --bg-card: rgba(255, 255, 255, 0.04);
+  --bg-card-hover: rgba(255, 255, 255, 0.08);
+  --bg-card-active: rgba(255, 255, 255, 0.12);
+  --bg-input: rgba(0, 0, 0, 0.35);
+  
+  --backdrop-blur: blur(20px);
+  --border-window: 1px solid rgba(255, 255, 255, 0.09);
+  --border-subtle: 1px solid rgba(255, 255, 255, 0.05);
+  
+  /* Fluent Radii */
+  --radius-window: 8px;
+  --radius-card: 6px;
+  --radius-button: 4px;
+  --radius-pill: 4px;
+  
+  /* Fluent Shadows */
+  --shadow-window: 0 16px 32px rgba(0, 0, 0, 0.38), 0 0 1px rgba(255, 255, 255, 0.1);
+  --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.25);
+  
+  /* Typography Colors */
+  --text-primary: #ffffff;
+  --text-secondary: #a6a6a6;
+  --text-tertiary: #6e6e6e;
+  --text-accent: #60cdff;
+}

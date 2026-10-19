@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN" data-platform="macos">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LiveHear</title>
+    <link rel="stylesheet" href="/src/styles/app.css" />
+  </head>
+  <body>
+    <!-- 顶部视图切换工具条 (开发与演示体验，可在划词气泡、会议HUD、主设置间无缝切换) -->
+    <div class="dev-toolbar no-drag">
+      <div class="tabs">
+        <button class="tab-btn active" id="tabBubble" onclick="window.__livehear_switch_view('bubble')">
+          💬 划词小气泡 (Bubble)
+        </button>
+        <button class="tab-btn" id="tabHud" onclick="window.__livehear_switch_view('hud')">
+          🎙️ 会议实时字幕 (HUD)
+        </button>
+        <button class="tab-btn" id="tabStudio" onclick="window.__livehear_switch_view('studio')">
+          ⚙️ 主面板与设置 (Studio)
+        </button>
+      </div>
+
+      <div class="platform-toggle">
+        <span>原生风格:</span>
+        <select id="platformSelect" onchange="window.__livehear_set_platform(this.value)">
+          <option value="macos" selected>🍎 macOS (Apple HIG Vibrancy)</option>
+          <option value="windows">🪟 Windows 11 (Fluent Mica/Acrylic)</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- 动态视图挂载容器 -->
+    <div id="app"></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
