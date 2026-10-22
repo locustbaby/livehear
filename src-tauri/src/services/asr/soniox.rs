@@ -61,6 +61,10 @@ struct SonioxStreamResponse {
     #[serde(default)]
     tokens: Vec<SonioxToken>,
     #[serde(default)]
+    final_audio_proc_ms: Option<u64>,
+    #[serde(default)]
+    total_audio_proc_ms: Option<u64>,
+    #[serde(default)]
     error_code: Option<u32>,
     #[serde(default)]
     error_message: Option<String>,
@@ -234,10 +238,12 @@ impl ASRService for SonioxLiveAdapter {
             let _ = write.close().await;
         });
 
+        let enable_translation = self.config.enable_translation;
+
         // 异步读任务：解析 Soniox 流式 Token（含自动说话人分离与双向同传）
         tokio::spawn(async move {
-            let mut confirmed_original = String::new();
-            let mut confirmed_translated = String::new();
+            let mut pending_final_orig = String::new();
+            let mut pending_final_trans = String::new();
             let mut current_speaker_id: u32 = 1;
             let mut sentence_start_ms: Option<u64> = None;
             let mut sentence_duration_ms: Option<u64> = None;
@@ -255,9 +261,9 @@ impl ASRService for SonioxLiveAdapter {
                                 continue;
                             }
 
-                            let mut provisional_original = String::new();
-                            let mut provisional_translated = String::new();
-                            let mut new_final_tokens = false;
+                            let mut prov_orig = String::new();
+                            let mut prov_trans = String::new();
+                            let mut has_final_in_msg = false;
 
                             for token in resp.tokens {
                                 if let Some(spk) = parse_speaker(&token) {
@@ -272,25 +278,91 @@ impl ASRService for SonioxLiveAdapter {
 
                                 let is_trans = token.translation_status.as_deref() == Some("translation");
                                 if token.is_final {
-                                    new_final_tokens = true;
+                                    has_final_in_msg = true;
                                     if is_trans {
-                                        confirmed_translated.push_str(&token.text);
+                                        pending_final_trans.push_str(&token.text);
                                     } else {
-                                        confirmed_original.push_str(&token.text);
+                                        pending_final_orig.push_str(&token.text);
                                     }
                                 } else {
                                     if is_trans {
-                                        provisional_translated.push_str(&token.text);
+                                        prov_trans.push_str(&token.text);
                                     } else {
-                                        provisional_original.push_str(&token.text);
+                                        prov_orig.push_str(&token.text);
                                     }
                                 }
                             }
 
-                            // 1. 如果有在途临时词，实时刷新 Partial 流（超低延时同传上屏）
-                            if !provisional_original.is_empty() || !provisional_translated.is_empty() {
-                                let display_orig = format!("{}{}", confirmed_original, provisional_original);
-                                let display_trans = format!("{}{}", confirmed_translated, provisional_translated);
+                            // 1. 若当前消息是新的流式临时词，且有待结算的完整 final 句子，立即派发并归档
+                            if !has_final_in_msg && (!pending_final_orig.trim().is_empty() || !pending_final_trans.trim().is_empty()) {
+                                println!(
+                                    "✨ [Soniox Final 结句] 原文: \"{}\" | 译文: \"{}\" (发言人: {})",
+                                    pending_final_orig.trim(),
+                                    pending_final_trans.trim(),
+                                    current_speaker_id
+                                );
+                                let mut final_seg = TranscriptSegment::new_final(
+                                    Speaker::remote(current_speaker_id),
+                                    pending_final_orig.trim().to_string(),
+                                    sentence_start_ms,
+                                    sentence_duration_ms,
+                                );
+                                if !pending_final_trans.trim().is_empty() {
+                                    final_seg.translated_text = Some(pending_final_trans.trim().to_string());
+                                }
+                                let _ = event_tx.send(final_seg);
+
+                                pending_final_orig.clear();
+                                pending_final_trans.clear();
+                                sentence_start_ms = None;
+                                sentence_duration_ms = None;
+                            }
+
+                            // 2. 若本次消息中包含 final 词，检查是否双语都已经齐备
+                            if has_final_in_msg {
+                                let ready_to_commit = if enable_translation {
+                                    !pending_final_orig.trim().is_empty() && !pending_final_trans.trim().is_empty()
+                                } else {
+                                    !pending_final_orig.trim().is_empty()
+                                };
+
+                                if ready_to_commit {
+                                    println!(
+                                        "✨ [Soniox 双语齐备结句] 原文: \"{}\" | 译文: \"{}\" (发言人: {})",
+                                        pending_final_orig.trim(),
+                                        pending_final_trans.trim(),
+                                        current_speaker_id
+                                    );
+                                    let mut final_seg = TranscriptSegment::new_final(
+                                        Speaker::remote(current_speaker_id),
+                                        pending_final_orig.trim().to_string(),
+                                        sentence_start_ms,
+                                        sentence_duration_ms,
+                                    );
+                                    if !pending_final_trans.trim().is_empty() {
+                                        final_seg.translated_text = Some(pending_final_trans.trim().to_string());
+                                    }
+                                    let _ = event_tx.send(final_seg);
+
+                                    pending_final_orig.clear();
+                                    pending_final_trans.clear();
+                                    sentence_start_ms = None;
+                                    sentence_duration_ms = None;
+                                }
+                            }
+
+                            // 3. 实时临时 Partial 流派发
+                            if !prov_orig.is_empty() || !prov_trans.is_empty() {
+                                let display_orig = if !pending_final_orig.is_empty() {
+                                    format!("{}{}", pending_final_orig, prov_orig)
+                                } else {
+                                    prov_orig
+                                };
+                                let display_trans = if !pending_final_trans.is_empty() {
+                                    format!("{}{}", pending_final_trans, prov_trans)
+                                } else {
+                                    prov_trans
+                                };
                                 let mut partial_seg = TranscriptSegment::new_partial(
                                     Speaker::remote(current_speaker_id),
                                     display_orig,
@@ -299,24 +371,6 @@ impl ASRService for SonioxLiveAdapter {
                                     partial_seg.translated_text = Some(display_trans);
                                 }
                                 let _ = event_tx.send(partial_seg);
-                            } else if new_final_tokens && (!confirmed_original.trim().is_empty() || !confirmed_translated.trim().is_empty()) {
-                                // 2. 没有临时词且结出了 final 词，说明当前句子断句完成
-                                let mut final_seg = TranscriptSegment::new_final(
-                                    Speaker::remote(current_speaker_id),
-                                    confirmed_original.trim().to_string(),
-                                    sentence_start_ms,
-                                    sentence_duration_ms,
-                                );
-                                if !confirmed_translated.trim().is_empty() {
-                                    final_seg.translated_text = Some(confirmed_translated.trim().to_string());
-                                }
-                                let _ = event_tx.send(final_seg);
-
-                                // 重置当前句累加器，准备迎接下一句
-                                confirmed_original.clear();
-                                confirmed_translated.clear();
-                                sentence_start_ms = None;
-                                sentence_duration_ms = None;
                             }
                         }
                         Err(e) => {
@@ -324,6 +378,20 @@ impl ASRService for SonioxLiveAdapter {
                         }
                     }
                 }
+            }
+
+            // WebSocket 结束时，清理尾部未发送的句子
+            if !pending_final_orig.trim().is_empty() || !pending_final_trans.trim().is_empty() {
+                let mut final_seg = TranscriptSegment::new_final(
+                    Speaker::remote(current_speaker_id),
+                    pending_final_orig.trim().to_string(),
+                    sentence_start_ms,
+                    sentence_duration_ms,
+                );
+                if !pending_final_trans.trim().is_empty() {
+                    final_seg.translated_text = Some(pending_final_trans.trim().to_string());
+                }
+                let _ = event_tx.send(final_seg);
             }
         });
 

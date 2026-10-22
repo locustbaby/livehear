@@ -72,6 +72,7 @@ class WebAudioRecorder {
   private stream: MediaStream | null = null;
   private processor: ScriptProcessorNode | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
+  private muteGain: GainNode | null = null;
   private resampler: StatefulResampler | null = null;
   private onAudioChunk: (chunk: number[]) => void;
   private onVolumeChange: (volume: number) => void;
@@ -85,8 +86,22 @@ class WebAudioRecorder {
     this.onVolumeChange = onVolumeChange;
   }
 
+  public async resumeIfSuspended(): Promise<boolean> {
+    if (this.audioCtx && this.audioCtx.state === 'suspended') {
+      try {
+        await this.audioCtx.resume();
+        console.log('🎙️ WebAudio AudioContext 状态已恢复至:', this.audioCtx.state);
+        return true;
+      } catch (e) {
+        console.warn('AudioContext 恢复失败:', e);
+      }
+    }
+    return false;
+  }
+
   public async start(): Promise<boolean> {
     try {
+      console.log('🎤 正在申请浏览器麦克风流 (getUserMedia)...');
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
@@ -96,15 +111,29 @@ class WebAudioRecorder {
         },
       });
 
+      console.log('✅ 麦克风已获授权，正在构建 WebAudio 图谱...');
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       this.audioCtx = new AudioCtx();
+
+      if (this.audioCtx.state === 'suspended') {
+        try {
+          await this.audioCtx.resume();
+          console.log('🎙️ AudioContext 已成功 resume');
+        } catch {
+          console.log('AudioContext 待用户手势激活');
+        }
+      }
+
       this.source = this.audioCtx.createMediaStreamSource(this.stream);
       this.resampler = new StatefulResampler(this.audioCtx.sampleRate, 16000);
 
       // bufferSize 4096 (~85ms @ 48kHz)
       this.processor = this.audioCtx.createScriptProcessor(4096, 1, 1);
+      this.muteGain = this.audioCtx.createGain();
+      this.muteGain.gain.value = 0; // 防止扬声器回放麦克风产生啸叫
 
       let lastVolumeUpdate = 0;
+      let chunkCount = 0;
 
       this.processor.onaudioprocess = (e) => {
         const inputBuffer = e.inputBuffer.getChannelData(0);
@@ -118,7 +147,7 @@ class WebAudioRecorder {
         const volume = Math.min(100, Math.round(rms * 280));
 
         const now = Date.now();
-        if (now - lastVolumeUpdate > 100) {
+        if (now - lastVolumeUpdate > 80) {
           lastVolumeUpdate = now;
           this.onVolumeChange(volume);
         }
@@ -134,12 +163,18 @@ class WebAudioRecorder {
         // 按 100ms (3200 字节) 一块实时分发
         while (this.pcmAccumulator.length >= 3200) {
           const chunk = this.pcmAccumulator.splice(0, 3200);
+          chunkCount++;
+          if (chunkCount % 20 === 0) {
+            console.log(`📡 [WebAudio Push] 已推送 ${chunkCount} 块音频，音量: ${volume}%`);
+          }
           this.onAudioChunk(chunk);
         }
       };
 
       this.source.connect(this.processor);
-      this.processor.connect(this.audioCtx.destination);
+      this.processor.connect(this.muteGain);
+      this.muteGain.connect(this.audioCtx.destination);
+      console.log('🎙️ WebAudio 处理链路已完全就绪，state:', this.audioCtx.state);
       return true;
     } catch (err: any) {
       console.warn('Web Audio 麦克风访问失败或用户取消:', err);
@@ -151,6 +186,10 @@ class WebAudioRecorder {
     if (this.processor) {
       this.processor.disconnect();
       this.processor = null;
+    }
+    if (this.muteGain) {
+      this.muteGain.disconnect();
+      this.muteGain = null;
     }
     if (this.source) {
       this.source.disconnect();
@@ -502,6 +541,15 @@ class LiveHearApp {
     (window as any).__livehear_action = (action: string, payload?: any) => {
       this.handleAction(action, payload);
     };
+
+    // 监听全局用户点击手势以激活处于 suspended 状态的 Web AudioContext
+    window.addEventListener(
+      'click',
+      () => {
+        this.audioRecorder.resumeIfSuspended();
+      },
+      { capture: true }
+    );
   }
 
   private bindKeyboardShortcuts() {
@@ -541,14 +589,12 @@ class LiveHearApp {
         break;
 
       case 'requestMicPermission':
-        const ok = await this.audioRecorder.start();
-        this.hudState.hasMicPermission = ok;
-        if (ok) {
+        await this.startLiveStream();
+        if (this.hudState.hasMicPermission) {
           this.showToast('✅ 麦克风已授权并开始实时收音！');
-          const btn = document.getElementById('btnRequestMic');
-          if (btn) btn.remove();
+          this.streamManager.clear(this.hudState.isStreaming, true);
         } else {
-          this.showToast('⚠️ 未能获得权限，请在「系统设置 -> 隐私与安全性 -> 麦克风」中允许 LiveHear');
+          this.showToast('⚠️ 未能获得权限，请在「系统设置 -> 隐私与安全性 -> 麦克风」中允许 LiveHear 或当前终端');
         }
         break;
 
@@ -631,6 +677,20 @@ class LiveHearApp {
         }
         break;
 
+      case 'simulateSpeech':
+        this.showToast('🎙️ 正在推送 8.5 秒真实语音测试流...');
+        try {
+          if (!this.hudState.isStreaming) {
+            await this.startLiveStream();
+          }
+          const simRes = await tauriInvoke<string>('simulate_test_speech');
+          this.showToast(`✅ ${simRes}`);
+          this.handleAction('toggleSettings'); // 关闭设置窗口让用户观察字幕
+        } catch (err: any) {
+          this.showToast(`❌ 模拟失败: ${err?.message || err}`);
+        }
+        break;
+
       case 'saveAllConfig':
         const sonioxInput = document.getElementById('cfgSonioxApiKey') as HTMLInputElement;
         if (sonioxInput) this.appConfig.soniox.api_key = sonioxInput.value.trim();
@@ -706,6 +766,12 @@ class LiveHearApp {
       const micOk = await this.audioRecorder.start();
       this.hudState.hasMicPermission = micOk;
 
+      if (!micOk) {
+        this.streamManager.clear(false, false);
+        this.showToast('⚠️ 未能访问麦克风，请点击界面中间的「请求授权」按钮');
+        return;
+      }
+
       await tauriInvoke('start_soniox_live');
       this.hudState.isStreaming = true;
 
@@ -713,6 +779,11 @@ class LiveHearApp {
       if (liveBtn) {
         liveBtn.className = 'live-status-pill no-drag streaming';
         liveBtn.innerHTML = `<span class="live-dot-pulse"></span><span class="live-text">正在同传</span>`;
+      }
+
+      // 如果当前列表为空，刷新占位符状态为“正在实时收音中”
+      if (this.hudState.subtitles.length === 0) {
+        this.streamManager.clear(true, true);
       }
 
       this.showToast('🟢 Soniox 全语种实时同传已就绪，请说话');

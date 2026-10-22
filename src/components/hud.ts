@@ -357,6 +357,9 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
               <button class="btn-subtle" style="margin-top: 8px; width: 100%" onclick="window.__livehear_action('requestMicPermission')">
                 🎙️ 重新请求/唤醒麦克风授权
               </button>
+              <button class="btn-subtle" style="margin-top: 6px; width: 100%; border-color: rgba(56, 189, 248, 0.4); color: #38bdf8;" onclick="window.__livehear_action('simulateSpeech')">
+                ▶️ 测试模拟音频推流 (8.5秒英文语音，验证同传打字上屏)
+              </button>
             </div>
           </div>
 

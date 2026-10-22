@@ -170,3 +170,35 @@ pub async fn push_audio(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn simulate_test_speech(
+    container: State<'_, Arc<AppContainer>>,
+) -> Result<String, String> {
+    let wav_path = std::path::Path::new("/tmp/long_speech.wav");
+    if !wav_path.exists() {
+        return Err("测试音频文件 /tmp/long_speech.wav 不存在".to_string());
+    }
+
+    let orch = {
+        let lock = container.orchestrator.read().await;
+        lock.clone()
+    };
+
+    let orch = orch.ok_or_else(|| "实时流尚未启动，请先启动实时同传".to_string())?;
+
+    tokio::spawn(async move {
+        if let Ok(wav_data) = std::fs::read("/tmp/long_speech.wav") {
+            let pcm = if wav_data.len() > 44 { &wav_data[44..] } else { &wav_data[..] };
+            println!("🎙️ [模拟测试音频] 开始推送真实语音流 (共 {} 字节)...", pcm.len());
+            for chunk in pcm.chunks(3200) {
+                let _ = orch.push_audio(chunk.to_vec()).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+            println!("✅ [模拟测试音频] 推送完毕！");
+        }
+    });
+
+    Ok("已启动 8.5 秒真实语音流模拟推送，请观察实时双语字幕".to_string())
+}
+
+
