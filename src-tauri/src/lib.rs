@@ -28,6 +28,7 @@ pub fn run() {
             commands::evaluate_and_predict,
             commands::start_soniox_live,
             commands::stop_soniox_live,
+            commands::push_audio,
         ])
         .run(tauri::generate_context!())
         .expect("运行 LiveHear Tauri 应用发生错误");

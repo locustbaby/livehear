@@ -10,6 +10,36 @@ pub struct SonioxConfig {
     pub sample_rate: u32,
     pub enable_speaker_diarization: bool,
     pub language_hints: Vec<String>,
+    #[serde(default = "default_enable_translation")]
+    pub enable_translation: bool,
+    #[serde(default = "default_translation_type")]
+    pub translation_type: String, // "two_way" or "one_way"
+    #[serde(default = "default_target_language")]
+    pub target_language: String, // "zh"
+    #[serde(default = "default_language_a")]
+    pub language_a: String, // "en"
+    #[serde(default = "default_language_b")]
+    pub language_b: String, // "zh"
+}
+
+fn default_enable_translation() -> bool {
+    true
+}
+
+fn default_translation_type() -> String {
+    "two_way".to_string()
+}
+
+fn default_target_language() -> String {
+    "zh".to_string()
+}
+
+fn default_language_a() -> String {
+    "en".to_string()
+}
+
+fn default_language_b() -> String {
+    "zh".to_string()
 }
 
 impl Default for SonioxConfig {
@@ -21,6 +51,11 @@ impl Default for SonioxConfig {
             sample_rate: 16000,
             enable_speaker_diarization: true,
             language_hints: vec!["en".to_string(), "zh".to_string()],
+            enable_translation: true,
+            translation_type: "two_way".to_string(),
+            target_language: "zh".to_string(),
+            language_a: "en".to_string(),
+            language_b: "zh".to_string(),
         }
     }
 }
@@ -91,6 +126,11 @@ pub struct AppConfig {
 impl AppConfig {
     /// 获取配置文件路径：优先读取当前目录或用户配置目录下的 livehear.config.json
     pub fn config_path() -> PathBuf {
+        let parent_root = PathBuf::from("../livehear.config.json");
+        if parent_root.exists() {
+            return parent_root;
+        }
+
         let local_path = PathBuf::from("livehear.config.json");
         if local_path.exists() {
             return local_path;

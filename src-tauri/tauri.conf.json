@@ -15,10 +15,14 @@
       {
         "label": "main",
         "title": "LiveHear",
-        "width": 900,
-        "height": 620,
+        "width": 880,
+        "height": 580,
+        "minWidth": 460,
+        "minHeight": 300,
         "resizable": true,
         "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
         "transparent": true
       }
     ],
@@ -29,6 +33,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "macOS": {
+      "infoPlist": "Info.plist",
+      "entitlements": "Entitlements.plist"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

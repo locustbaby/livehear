@@ -110,6 +110,14 @@ pub async fn start_soniox_live(
     app: AppHandle,
     container: State<'_, Arc<AppContainer>>,
 ) -> Result<(), String> {
+    // 确保若已有运行中的协同实例，先安全停止，避免麦克风硬件资源争抢或重复连线
+    {
+        let mut lock = container.orchestrator.write().await;
+        if let Some(old_orch) = lock.take() {
+            old_orch.stop().await;
+        }
+    }
+
     let conf = {
         let guard = container.config.read().await;
         guard.clone()
@@ -149,3 +157,16 @@ pub async fn stop_soniox_live(container: State<'_, Arc<AppContainer>>) -> Result
     *lock = None;
     Ok(())
 }
+
+#[tauri::command]
+pub async fn push_audio(
+    chunk: Vec<u8>,
+    container: State<'_, Arc<AppContainer>>,
+) -> Result<(), String> {
+    let lock = container.orchestrator.read().await;
+    if let Some(orch) = lock.as_ref() {
+        orch.push_audio(chunk).await.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+

@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod asr;
+pub mod audio_capture;
 
 use crate::domain::{JevDecision, LiveHearError, ReplySuggestion, TranscriptSegment};
 use async_trait::async_trait;

@@ -118,8 +118,18 @@ impl DecisionGateService for JevAdapter {
 
         if let Ok(data) = res.json::<ChatCompletionResponse>().await {
             if let Some(choice) = data.choices.first() {
-                let text = &choice.message.content;
-                if let Ok(raw) = serde_json::from_str::<RawJevOutput>(text) {
+                let raw_content = &choice.message.content;
+                let clean_json = if let (Some(start), Some(end)) = (raw_content.find('{'), raw_content.rfind('}')) {
+                    if start <= end {
+                        &raw_content[start..=end]
+                    } else {
+                        raw_content.as_str()
+                    }
+                } else {
+                    raw_content.as_str()
+                };
+
+                if let Ok(raw) = serde_json::from_str::<RawJevOutput>(clean_json) {
                     let intent = match raw.intent.as_deref() {
                         Some("progress_check") => MeetingIntent::ProgressCheck,
                         Some("technical_blocker") => MeetingIntent::TechnicalBlocker,

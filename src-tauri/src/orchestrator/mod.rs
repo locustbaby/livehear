@@ -1,4 +1,5 @@
 use crate::domain::{LiveHearError, ReplySuggestion, TranscriptSegment};
+use crate::services::audio_capture::NativeAudioCapture;
 use crate::services::{ASRService, DecisionGateService, PredictService, TranslationService};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,7 +24,9 @@ pub struct LiveHearOrchestrator {
     meeting_context: String,
     auto_predict: bool,
     is_running: Arc<AtomicBool>,
+    has_stopped_native: Arc<AtomicBool>,
     audio_tx: tokio::sync::Mutex<Option<mpsc::Sender<Vec<u8>>>>,
+    audio_capture: tokio::sync::Mutex<NativeAudioCapture>,
 }
 
 impl LiveHearOrchestrator {
@@ -43,11 +46,13 @@ impl LiveHearOrchestrator {
             meeting_context,
             auto_predict,
             is_running: Arc::new(AtomicBool::new(false)),
+            has_stopped_native: Arc::new(AtomicBool::new(false)),
             audio_tx: tokio::sync::Mutex::new(None),
+            audio_capture: tokio::sync::Mutex::new(NativeAudioCapture::new()),
         }
     }
 
-    /// 启动全链路协同流：音频录入 -> ASR -> 并发翻译 -> Jev 问句门禁 -> 策略预测
+    /// 启动全链路协同流：原生音频录入 -> ASR -> 并发翻译 -> Jev 问句门禁 -> 策略预测
     pub async fn start(&self, app: AppHandle) -> Result<(), LiveHearError> {
         if self.is_running.load(Ordering::SeqCst) {
             return Ok(());
@@ -56,7 +61,15 @@ impl LiveHearOrchestrator {
         let (audio_sender, mut transcript_rx) = self.asr_service.start_stream().await?;
         {
             let mut lock = self.audio_tx.lock().await;
-            *lock = Some(audio_sender);
+            *lock = Some(audio_sender.clone());
+        }
+
+        // 启动系统原生麦克风实时高保真采集 (cpal)
+        {
+            let mut cap = self.audio_capture.lock().await;
+            if let Err(e) = cap.start(audio_sender) {
+                eprintln!("⚠️ [LiveHear] 原生麦克风启动警告 (将回退至 IPC 输入): {}", e);
+            }
         }
 
         self.is_running.store(true, Ordering::SeqCst);
@@ -93,11 +106,26 @@ impl LiveHearOrchestrator {
                             tokio::spawn(async move {
                                 let original_text = segment.text.clone();
 
-                                // 并发任务 1: 机器翻译
-                                let translated = trans_svc
-                                    .translate(&original_text, "en", "zh")
-                                    .await
-                                    .unwrap_or_else(|_| "翻译中...".to_string());
+                                // 并发任务 1: 机器翻译（优先复用 Soniox 原生流式同传翻译，无额外 LLM 网络耗时）
+                                let translated = if let Some(soniox_trans) = segment.translated_text.take() {
+                                    if !soniox_trans.trim().is_empty() {
+                                        soniox_trans
+                                    } else if !original_text.trim().is_empty() {
+                                        trans_svc
+                                            .translate(&original_text, "en", "zh")
+                                            .await
+                                            .unwrap_or_else(|_| "翻译中...".to_string())
+                                    } else {
+                                        String::new()
+                                    }
+                                } else if !original_text.trim().is_empty() {
+                                    trans_svc
+                                        .translate(&original_text, "en", "zh")
+                                        .await
+                                        .unwrap_or_else(|_| "翻译中...".to_string())
+                                } else {
+                                    String::new()
+                                };
                                 segment.translated_text = Some(translated);
 
                                 let mut detected_intent = None;
@@ -137,8 +165,13 @@ impl LiveHearOrchestrator {
         Ok(())
     }
 
-    /// 推送 PCM 音频流
+    /// 推送 PCM 音频流（前端 Web Audio 优先采集流）
     pub async fn push_audio(&self, pcm_chunk: Vec<u8>) -> Result<(), LiveHearError> {
+        // 若前端 Web Audio 已激活并推送音频，仅在首次调用时暂停后台 cpal 原生麦克风，避免双重采集
+        if !self.has_stopped_native.swap(true, Ordering::Relaxed) {
+            let mut cap = self.audio_capture.lock().await;
+            cap.stop();
+        }
         let lock = self.audio_tx.lock().await;
         if let Some(tx) = lock.as_ref() {
             let _ = tx.send(pcm_chunk).await;
@@ -148,6 +181,10 @@ impl LiveHearOrchestrator {
 
     pub async fn stop(&self) {
         self.is_running.store(false, Ordering::SeqCst);
+        {
+            let mut cap = self.audio_capture.lock().await;
+            cap.stop();
+        }
         let mut lock = self.audio_tx.lock().await;
         *lock = None;
     }
