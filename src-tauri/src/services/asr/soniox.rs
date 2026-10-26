@@ -66,6 +66,8 @@ struct SonioxStartPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     language_hints: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    language_hints_strict: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<SonioxContextPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
     translation: Option<SonioxTranslationPayload>,
@@ -76,6 +78,8 @@ struct SonioxToken {
     text: String,
     #[serde(default)]
     is_final: bool,
+    #[serde(default)]
+    confidence: Option<f32>,
     #[serde(default)]
     speaker: Option<serde_json::Value>,
     #[serde(default)]
@@ -229,6 +233,11 @@ impl SonioxLiveAdapter {
                 None
             } else {
                 Some(self.config.language_hints.clone())
+            },
+            language_hints_strict: if self.config.language_hints.is_empty() {
+                None
+            } else {
+                Some(self.config.language_hints_strict)
             },
             context: self.build_context_payload(),
             translation: self.build_translation_payload(),
@@ -514,6 +523,7 @@ struct UtteranceState {
     endpoint_pending_since: Option<tokio::time::Instant>,
     /// 当 <end> 触发但当前文本尚不构成完整语义句时，开启续航保持窗口（允许同一人停顿思考后继续把话说完）
     incomplete_hold_since: Option<tokio::time::Instant>,
+    low_confidence_words: Vec<String>,
     enable_translation: bool,
     translation_type: String,
     target_lang: String,
@@ -536,6 +546,7 @@ impl UtteranceState {
             detected_lang: None,
             endpoint_pending_since: None,
             incomplete_hold_since: None,
+            low_confidence_words: Vec::new(),
             enable_translation,
             translation_type,
             target_lang,
@@ -610,6 +621,7 @@ impl UtteranceState {
             );
             final_seg.confirmed_text = Some(orig);
             final_seg.detected_language = eff_lang;
+            final_seg.low_confidence_words = self.low_confidence_words.clone();
             if !trans.is_empty() {
                 final_seg.confirmed_translated_text = Some(trans.clone());
                 final_seg.translated_text = Some(trans);
@@ -627,6 +639,7 @@ impl UtteranceState {
         self.sentence_end_ms = None;
         self.endpoint_pending_since = None;
         self.incomplete_hold_since = None;
+        self.low_confidence_words.clear();
     }
 
     fn emit_partial(
@@ -1028,9 +1041,10 @@ fn process_token_batch(
         }
         let clean_text = strip_control_markers(&token.text);
 
-        // 说话人分离核心准则：仅由【已确认的原声 Token (token.is_final && !is_trans)】驱动说话人切换，
-        // 并引入声纹防抖迟滞门限 (Hysteresis)，防止多人会议中 1~2 词的声纹跳变或附和词 ("嗯"/"Yeah") 将长句切碎。
-        if !is_trans && token.is_final && !clean_text.trim().is_empty() {
+        // 说话人分离核心准则：仅由【已确认且声学置信度合格的原声 Token (token.is_final && !is_trans && conf >= 0.62)】驱动说话人切换，
+        // 并引入声纹防抖迟滞门限 (Hysteresis)，防止多人会议中呼吸杂音、1~2 词的声纹跳变或附和词 ("嗯"/"Yeah") 将长句切碎。
+        let tok_conf = token.confidence.unwrap_or(1.0);
+        if !is_trans && token.is_final && !clean_text.trim().is_empty() && tok_conf >= 0.62 {
             if let Some(spk) = parse_speaker(token) {
                 match state.current_speaker_id {
                     None => {
@@ -1151,6 +1165,15 @@ fn process_token_batch(
             if is_trans {
                 state.pending_final_trans.push_str(&clean_text);
             } else {
+                if tok_conf < 0.78 {
+                    let w = clean_text.trim();
+                    if w.chars().count() >= 2 && state.low_confidence_words.len() < 8 {
+                        let entry = format!("{}({:.2})", w, tok_conf);
+                        if !state.low_confidence_words.contains(&entry) {
+                            state.low_confidence_words.push(entry);
+                        }
+                    }
+                }
                 append_smart_text(&mut state.pending_final_orig, &clean_text);
             }
         } else if is_trans {
@@ -1233,6 +1256,7 @@ mod tests {
         SonioxToken {
             text: text.to_string(),
             is_final,
+            confidence: Some(0.95),
             speaker: speaker.map(|s| serde_json::Value::String(s.to_string())),
             spk: None,
             start_ms: Some(100),

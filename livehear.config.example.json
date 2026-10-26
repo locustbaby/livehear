@@ -1,28 +1,37 @@
 {
   "soniox": {
-    "api_key": "snx_proj_YOUR_SONIOX_KEY_HERE",
+    "api_key": "YOUR_SONIOX_API_KEY",
     "ws_url": "wss://stt-rt.soniox.com/transcribe-websocket",
     "model": "stt-rt-v5",
     "sample_rate": 16000,
     "enable_speaker_diarization": true,
-    "language_hints": [],
+    "enable_endpoint_detection": true,
+    "language_hints": ["en", "zh"],
+    "language_hints_strict": true,
     "enable_translation": true,
     "translation_type": "one_way",
     "target_language": "zh",
     "language_a": "en",
-    "language_b": "zh"
+    "language_b": "zh",
+    "max_endpoint_delay_ms": 2000,
+    "endpoint_sensitivity": -0.2,
+    "custom_terms": ["Kubernetes", "Soniox", "OpenRouter", "SLA"],
+    "enable_vad": true,
+    "vad_threshold": 1.8,
+    "input_device": null
   },
   "openrouter": {
-    "api_key": "sk-YOUR_OPENROUTER_KEY_HERE",
+    "api_key": "YOUR_OPENROUTER_OR_OPENAI_COMPATIBLE_API_KEY",
     "base_url": "https://openrouter.ai/api/v1",
     "translate_model": "deepseek/deepseek-chat",
-    "predict_model": "deepseek/deepseek-chat"
+    "predict_model": "anthropic/claude-3.5-haiku",
+    "enable_polish": true
   },
   "jev": {
     "enabled": true,
-    "api_key": "sk-YOUR_JEV_KEY_HERE",
+    "api_key": "YOUR_OPENROUTER_OR_OPENAI_COMPATIBLE_API_KEY",
     "base_url": "https://openrouter.ai/api/v1",
-    "model": "deepseek/deepseek-chat",
+    "model": "typesafe/jev-1.13",
     "confidence_threshold": 0.8
   },
   "meeting": {

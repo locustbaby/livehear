@@ -15,6 +15,8 @@ pub struct TranscriptSegment {
     pub confirmed_translated_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisional_translated_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub low_confidence_words: Vec<String>,
     pub detected_language: Option<String>,
     pub is_final: bool,
     pub start_ms: Option<u64>,
@@ -41,6 +43,7 @@ impl TranscriptSegment {
             provisional_text: None,
             confirmed_translated_text: None,
             provisional_translated_text: None,
+            low_confidence_words: Vec::new(),
             detected_language: None,
             is_final: false,
             start_ms: None,
@@ -80,6 +83,7 @@ impl TranscriptSegment {
             provisional_text: None,
             confirmed_translated_text: None,
             provisional_translated_text: None,
+            low_confidence_words: Vec::new(),
             detected_language: None,
             is_final: true,
             start_ms,

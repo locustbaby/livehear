@@ -52,6 +52,7 @@ pub struct LiveHearOrchestrator {
     target_language: String,
     enable_vad: bool,
     vad_threshold: f32,
+    input_device: Option<String>,
     is_running: Arc<AtomicBool>,
     stop_notify: Arc<Notify>,
     sequence_counter: Arc<AtomicU64>,
@@ -71,6 +72,7 @@ impl LiveHearOrchestrator {
         target_language: String,
         enable_vad: bool,
         vad_threshold: f32,
+        input_device: Option<String>,
     ) -> Self {
         Self {
             asr_service,
@@ -83,6 +85,7 @@ impl LiveHearOrchestrator {
             target_language,
             enable_vad,
             vad_threshold,
+            input_device,
             is_running: Arc::new(AtomicBool::new(false)),
             stop_notify: Arc::new(Notify::new()),
             sequence_counter: Arc::new(AtomicU64::new(1)),
@@ -114,10 +117,16 @@ impl LiveHearOrchestrator {
             *lock = Some(audio_sender.clone());
         }
 
-        // 2. 启动系统原生麦克风实时高保真采集 (cpal + 智能静音门禁降费)
+        // 2. 启动系统原生麦克风或指定内录设备实时高保真采集
         {
             let mut cap = self.audio_capture.lock().await;
-            if let Err(e) = cap.start(audio_sender, app.clone(), self.enable_vad, self.vad_threshold) {
+            if let Err(e) = cap.start(
+                audio_sender,
+                app.clone(),
+                self.enable_vad,
+                self.vad_threshold,
+                self.input_device.as_deref(),
+            ) {
                 let err_msg = format!("麦克风启动失败: {}", e);
                 eprintln!("⚠️ [LiveHear] {}", err_msg);
                 let _ = app.emit("asr-status", "error");

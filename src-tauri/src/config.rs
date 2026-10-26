@@ -16,6 +16,8 @@ pub struct SonioxConfig {
     pub enable_endpoint_detection: bool,
     #[serde(default = "default_language_hints")]
     pub language_hints: Vec<String>,
+    #[serde(default = "default_language_hints_strict")]
+    pub language_hints_strict: bool,
     #[serde(default = "default_enable_translation")]
     pub enable_translation: bool,
     #[serde(default = "default_translation_type")]
@@ -36,6 +38,8 @@ pub struct SonioxConfig {
     pub enable_vad: bool, // 智能静音门禁，降低 60-70% Soniox Token 扣费
     #[serde(default = "default_vad_threshold")]
     pub vad_threshold: f32,
+    #[serde(default)]
+    pub input_device: Option<String>,
 }
 
 fn default_enable_endpoint_detection() -> bool {
@@ -44,6 +48,10 @@ fn default_enable_endpoint_detection() -> bool {
 
 fn default_language_hints() -> Vec<String> {
     vec!["en".to_string(), "zh".to_string()]
+}
+
+fn default_language_hints_strict() -> bool {
+    true
 }
 
 fn default_enable_translation() -> bool {
@@ -92,6 +100,7 @@ impl Default for SonioxConfig {
             enable_speaker_diarization: true,
             enable_endpoint_detection: true,
             language_hints: vec!["en".to_string(), "zh".to_string()],
+            language_hints_strict: true,
             enable_translation: true,
             translation_type: "one_way".to_string(),
             target_language: "zh".to_string(),
@@ -102,6 +111,7 @@ impl Default for SonioxConfig {
             custom_terms: vec![],
             enable_vad: true,
             vad_threshold: 1.8,
+            input_device: None,
         }
     }
 }

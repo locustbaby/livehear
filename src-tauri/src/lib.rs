@@ -39,6 +39,13 @@ pub fn run() {
             commands::save_meeting_transcript,
             commands::open_path_in_finder,
             commands::polish_transcript,
+            commands::lookup_selection,
+            commands::generate_copilot_prompts,
+            commands::list_audio_devices,
+            commands::set_stealth_mode,
+            commands::set_click_through,
+            commands::summarize_meeting_context,
+            commands::generate_ai_minutes,
         ])
         .run(tauri::generate_context!())
         .expect("运行 LiveHear Tauri 应用发生错误");

@@ -145,6 +145,7 @@ pub async fn start_soniox_live(
         conf.soniox.target_language,
         conf.soniox.enable_vad,
         conf.soniox.vad_threshold,
+        conf.soniox.input_device,
     ));
 
     orchestrator.start(app).await.map_err(|e| e.to_string())?;
@@ -272,15 +273,21 @@ pub async fn open_path_in_finder(path: String) -> Result<(), String> {
 pub async fn polish_transcript(
     original: String,
     draft: String,
+    recent_history: Option<String>,
+    low_confidence_words: Option<Vec<String>>,
     container: State<'_, Arc<AppContainer>>,
-) -> Result<String, String> {
+) -> Result<crate::services::ai::openrouter::PolishResult, String> {
     let conf = {
         let guard = container.config.read().await;
         guard.clone()
     };
 
     if !conf.openrouter.enable_polish {
-        return Ok(draft);
+        return Ok(crate::services::ai::openrouter::PolishResult {
+            original,
+            translated: draft,
+            tone_tag: None,
+        });
     }
 
     let adapter = crate::services::ai::OpenRouterAdapter::new(conf.openrouter);
@@ -288,9 +295,108 @@ pub async fn polish_transcript(
         .polish_and_connect(
             &original,
             &draft,
+            recent_history.as_deref().unwrap_or(""),
+            &low_confidence_words.unwrap_or_default(),
             &conf.meeting.context,
             &conf.soniox.custom_terms,
         )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn lookup_selection(
+    selection: String,
+    sentence_context: Option<String>,
+    container: State<'_, Arc<AppContainer>>,
+) -> Result<crate::services::ai::openrouter::LookupResult, String> {
+    let (openrouter_cfg, meeting_ctx) = {
+        let guard = container.config.read().await;
+        (guard.openrouter.clone(), guard.meeting.context.clone())
+    };
+    let adapter = crate::services::ai::OpenRouterAdapter::new(openrouter_cfg);
+    adapter
+        .lookup_selection(
+            &selection,
+            sentence_context.as_deref().unwrap_or(""),
+            &meeting_ctx,
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn generate_copilot_prompts(
+    recent_history: String,
+    user_intent: Option<String>,
+    container: State<'_, Arc<AppContainer>>,
+) -> Result<Vec<ReplySuggestion>, String> {
+    let (openrouter_cfg, meeting_ctx) = {
+        let guard = container.config.read().await;
+        (guard.openrouter.clone(), guard.meeting.context.clone())
+    };
+    let adapter = crate::services::ai::OpenRouterAdapter::new(openrouter_cfg);
+    adapter
+        .generate_copilot_prompts(&recent_history, user_intent.as_deref(), &meeting_ctx)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_audio_devices() -> Result<Vec<String>, String> {
+    Ok(crate::services::audio_capture::list_input_devices())
+}
+
+#[tauri::command]
+pub async fn set_stealth_mode(
+    enabled: bool,
+    window: tauri::WebviewWindow,
+) -> Result<bool, String> {
+    window
+        .set_content_protected(enabled)
+        .map_err(|e| format!("设置防截屏隐身模式失败: {}", e))?;
+    Ok(enabled)
+}
+
+#[tauri::command]
+pub async fn set_click_through(
+    enabled: bool,
+    window: tauri::WebviewWindow,
+) -> Result<bool, String> {
+    window
+        .set_ignore_cursor_events(enabled)
+        .map_err(|e| format!("设置鼠标穿透失败: {}", e))?;
+    Ok(enabled)
+}
+
+#[tauri::command]
+pub async fn summarize_meeting_context(
+    recent_history: String,
+    container: State<'_, Arc<AppContainer>>,
+) -> Result<Vec<ReplySuggestion>, String> {
+    let (openrouter_cfg, meeting_ctx) = {
+        let guard = container.config.read().await;
+        (guard.openrouter.clone(), guard.meeting.context.clone())
+    };
+    let adapter = crate::services::ai::OpenRouterAdapter::new(openrouter_cfg);
+    adapter
+        .summarize_recent_context(&recent_history, &meeting_ctx)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn generate_ai_minutes(
+    transcript: String,
+    container: State<'_, Arc<AppContainer>>,
+) -> Result<String, String> {
+    let (openrouter_cfg, meeting_ctx) = {
+        let guard = container.config.read().await;
+        (guard.openrouter.clone(), guard.meeting.context.clone())
+    };
+    let adapter = crate::services::ai::OpenRouterAdapter::new(openrouter_cfg);
+    adapter
+        .generate_meeting_minutes(&transcript, &meeting_ctx)
         .await
         .map_err(|e| e.to_string())
 }

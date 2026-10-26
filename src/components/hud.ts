@@ -1,5 +1,5 @@
 // 会议实时双语同传与智能推测 HUD 视图组件 (Live Meeting HUD)
-import type { FullAppConfig } from './studio';
+import type { FullAppConfig } from '../types/domain';
 
 export interface SubtitleItem {
   id: string;
@@ -18,6 +18,8 @@ export interface SubtitleItem {
   isPolished?: boolean;
   isContinuation?: boolean;
   lastUpdatedMs?: number;
+  lowConfidenceWords?: string[];
+  toneTag?: string;
 }
 
 export interface SuggestionItem {
@@ -46,6 +48,44 @@ export interface HudState {
   hasMicPermission: boolean;
   permissionError?: string;
   isSettingsOpen: boolean;
+  isQuickLangOpen?: boolean;
+  isCopilotLoading?: boolean;
+  isStealthMode?: boolean;
+  audioDevices?: string[];
+}
+
+export interface SelectionLookupData {
+  text: string;
+  phonetic_or_type: string;
+  meaning: string;
+  context_explanation: string;
+  term_pair?: string | null;
+  loading?: boolean;
+  x: number;
+  y: number;
+}
+
+const TARGET_LANG_NAMES: Record<string, string> = {
+  zh: '中文',
+  en: 'English',
+  ja: '日本語',
+  th: 'ไทย',
+  ko: '한국어',
+  fr: 'Français',
+  de: 'Deutsch',
+  es: 'Español',
+};
+
+export function formatTopbarLangBadgeText(config?: FullAppConfig): string {
+  const isOneWay = config?.soniox?.translation_type !== 'two_way';
+  const hints = (config?.soniox?.language_hints || ['en', 'zh']).map((h) => h.toUpperCase()).join('+');
+  const strictIcon = config?.soniox?.language_hints_strict !== false ? '🔒' : '';
+  const targetCode = config?.soniox?.target_language || 'zh';
+  const targetName = TARGET_LANG_NAMES[targetCode] || targetCode.toUpperCase();
+  if (!isOneWay) {
+    return `中 ⇄ 英 双向 (${hints}${strictIcon}) ▾`;
+  }
+  return `[${hints}${strictIcon}] ➔ ${targetName} ▾`;
 }
 
 export function renderHudView(
@@ -54,7 +94,6 @@ export function renderHudView(
   _onAction?: (action: string, payload?: any) => void
 ): string {
   const isMicHealthy = state.hasMicPermission && state.micVolume > 0;
-  const isOneWay = config?.soniox?.translation_type !== 'two_way';
 
   return `
     <div class="hud-window ${state.isClickThrough ? 'is-click-through' : ''}" data-tauri-drag-region>
@@ -100,11 +139,14 @@ export function renderHudView(
           `
           }
 
-          <!-- 语种模式指示徽章 -->
-          <div class="lang-auto-badge" title="${isOneWay ? '涉外会议单向同传：外语全部实时同传为中文' : '双向对谈：中英双向互译'}">
+          <!-- 语种范围与目标语言快捷切换胶囊 (点击弹出快捷面板) -->
+          <button class="lang-auto-badge no-drag interactive-lang-pill"
+                  id="btnQuickLangPill"
+                  title="点击快速切换收听语种范围 (Language Hints) 与目标翻译语言"
+                  onclick="window.__livehear_action('toggleQuickLangPopover')">
             <span class="globe-icon">🌐</span>
-            <span>${isOneWay ? '全语种 ➔ 中文同传' : '中 ⇄ 英 双向互译'}</span>
-          </div>
+            <span id="topbarLangBadgeText">${escapeHtml(formatTopbarLangBadgeText(config))}</span>
+          </button>
 
           <!-- 智能 VAD 节费状态微标 -->
           <div class="vad-eco-badge" title="智能静音降费门禁已激活：静音时不推流扣费，节省 60-70% Token 支出">
@@ -142,8 +184,33 @@ export function renderHudView(
             ⚡ ${state.sonioxLatencyMs || 64}ms
           </span>
 
+          <!-- 一键发言提词 / 帮我接话按钮 -->
+          <button class="copilot-trigger-pill no-drag ${state.hasPredictSuggestion ? 'active' : ''}"
+                  id="btnOpenCopilot"
+                  title="根据上文快速生成我方发言提词与回应建议 (快捷键: ⌘+K)"
+                  onclick="window.__livehear_action('openCopilotDrawer')">
+            <span>💡</span>
+            <span>帮我接话</span>
+          </button>
+
+          <!-- 投屏隐身防录屏模式 (Stealth Mode) -->
+          <button class="icon-btn no-drag ${state.isStealthMode ? 'active stealth-active' : ''}"
+                  id="btnToggleStealth"
+                  title="${state.isStealthMode ? '投屏隐身已开启：共享屏幕/截图时此窗口完全隐形 (⌘+Shift+H)' : '点击开启投屏隐身：Zoom/腾讯会议/飞书共享屏幕时隐藏此浮窗 (⌘+Shift+H)'}"
+                  onclick="window.__livehear_action('toggleStealthMode')">
+            🕶️
+          </button>
+
+          <!-- 鼠标穿透模式 (Click-Through) -->
+          <button class="icon-btn no-drag ${state.isClickThrough ? 'active' : ''}"
+                  id="btnToggleClickThrough"
+                  title="${state.isClickThrough ? '鼠标穿透已开启 (按 ⌘+Shift+X 恢复点击)' : '点击开启鼠标穿透：不遮挡底层软件点击 (⌘+Shift+X)'}"
+                  onclick="window.__livehear_action('toggleClickThrough')">
+            👻
+          </button>
+
           <button class="icon-btn no-drag" 
-                  title="一键导出为会议速记 Markdown 纪要"
+                  title="一键导出为会议速记 Markdown 纪要 (自动附带 AI 决议与待办提炼)"
                   onclick="window.__livehear_action('exportTranscript')">
             📥
           </button>
@@ -167,6 +234,14 @@ export function renderHudView(
           </button>
         </div>
       </div>
+
+      <!-- 顶栏快捷语种范围与目标语言热切浮层 -->
+      <div id="quickLangPopoverContainer">
+        ${state.isQuickLangOpen && config ? renderQuickLangPopoverHtml(config) : ''}
+      </div>
+
+      <!-- 划词 / 点击单词语境精译悬浮卡片容器 -->
+      <div id="selectionLookupContainer"></div>
 
       <!-- 连续无边界流式字幕流瀑布 (Fluid River Stream - 无生硬卡片外框，视觉连贯透气) -->
       <div class="subtitles-stream selectable-text" id="subtitlesStream">
@@ -334,12 +409,21 @@ export function renderSubtitleTurnHtml(item: SubtitleItem, displayMode: Subtitle
             ? `
           <div class="turn-meta is-compact-meta">
             <span class="turn-time">${item.timestamp}</span>
-            <button class="turn-copy-action no-drag" 
-                    title="点击复制此句内容"
-                    onclick="window.__livehear_action('copyText', '${escapeJs(copyContent)}', this)">
-              <span class="copy-icon">📋</span>
-              <span class="copy-label">复制</span>
-            </button>
+            ${item.toneTag ? `<span class="turn-tone-tag">${escapeHtml(item.toneTag)}</span>` : ''}
+            <div class="turn-actions-group">
+              <button class="turn-reply-action no-drag"
+                      title="针对这句话生成我方接话提词"
+                      onclick="window.__livehear_action('promptReplyForTurn', '${escapeJs(item.id)}')">
+                <span>💬</span>
+                <span>接话</span>
+              </button>
+              <button class="turn-copy-action no-drag" 
+                      title="点击复制此句内容"
+                      onclick="window.__livehear_action('copyText', '${escapeJs(copyContent)}', this)">
+                <span class="copy-icon">📋</span>
+                <span class="copy-label">复制</span>
+              </button>
+            </div>
           </div>
         `
             : `
@@ -347,14 +431,22 @@ export function renderSubtitleTurnHtml(item: SubtitleItem, displayMode: Subtitle
             <span class="turn-speaker-name ${speakerClass}">${escapeHtml(item.speaker)}</span>
             <span class="turn-time">${item.timestamp}</span>
             ${langLabel ? `<span class="turn-lang-tag">${escapeHtml(langLabel)}</span>` : ''}
+            ${item.toneTag ? `<span class="turn-tone-tag">${escapeHtml(item.toneTag)}</span>` : ''}
 
-            <!-- 优雅悬浮复制操作钮 (带即时反馈特效) -->
-            <button class="turn-copy-action no-drag" 
-                    title="点击复制此句内容"
-                    onclick="window.__livehear_action('copyText', '${escapeJs(copyContent)}', this)">
-              <span class="copy-icon">📋</span>
-              <span class="copy-label">复制</span>
-            </button>
+            <div class="turn-actions-group">
+              <button class="turn-reply-action no-drag"
+                      title="针对这句话生成我方接话提词"
+                      onclick="window.__livehear_action('promptReplyForTurn', '${escapeJs(item.id)}')">
+                <span>💬</span>
+                <span>接话</span>
+              </button>
+              <button class="turn-copy-action no-drag" 
+                      title="点击复制此句内容"
+                      onclick="window.__livehear_action('copyText', '${escapeJs(copyContent)}', this)">
+                <span class="copy-icon">📋</span>
+                <span class="copy-label">复制</span>
+              </button>
+            </div>
           </div>
         `
         }
@@ -399,9 +491,10 @@ function renderTurnTextLines(
       item.provisionalOriginal,
       item.isPartial
     );
+    const zhBadgeText = item.isPolished ? '中文 · 纠偏' : '中文';
     return `
-      <div class="turn-line-trans is-native-zh" title="中文发言原声">
-        <span class="role-badge zh-badge">中文</span>
+      <div class="turn-line-trans is-native-zh ${item.isPolished ? 'is-polished' : ''}" title="${item.isPolished ? 'AI 已结合前后文完成同音词与术语纠偏' : '中文发言原声'}">
+        <span class="role-badge zh-badge ${item.isPolished ? 'polished' : ''}">${zhBadgeText}</span>
         <span class="line-text">${nativeBody}</span>
         ${item.isPartial ? '<span class="streaming-pulse-cursor"></span>' : ''}
       </div>
@@ -457,33 +550,235 @@ function renderTurnTextLines(
   return `${transLine}${origLine}`;
 }
 
-export function renderSuggestionsHtml(suggestions: SuggestionItem[], intentCategory?: string): string {
+function splitBilingualDetail(detail: string): { mainText: string; subNote: string } {
+  const trimmed = (detail || '').trim();
+  const match = trimmed.match(/^(.*?)\s*[\(（]([^\)）]+)[\)）]\s*$/);
+  if (match && match[1].trim()) {
+    return { mainText: match[1].trim(), subNote: match[2].trim() };
+  }
+  return { mainText: trimmed, subNote: '' };
+}
+
+export function renderSuggestionsHtml(
+  suggestions: SuggestionItem[],
+  intentCategory?: string,
+  isLoading = false,
+  customIntent = ''
+): string {
   return `
-    <div class="predict-drawer">
+    <div class="predict-drawer no-drag">
       <div class="predict-header">
         <div class="predict-title">
           <span class="glow-bulb">💡</span>
-          <span class="title-text">智能会议应答建议</span>
-          <span class="jev-badge">${escapeHtml(intentCategory || '排期问询')}</span>
+          <span class="title-text">实时发言提词 &amp; 应答智囊</span>
+          <span class="jev-badge">${escapeHtml(intentCategory || '结合上文提词')}</span>
         </div>
-        <span class="shortcut-tip">按快捷键一键复制回答</span>
+        <div class="predict-header-actions">
+          <button class="copilot-mini-btn tldr-btn no-drag" title="走神救星：3秒浓缩过去几分钟的讨论焦点、共识与待拍板事项" onclick="window.__livehear_action('summarizeRecentContext')">
+            📝 浓缩前文
+          </button>
+          <button class="copilot-mini-btn no-drag" title="结合最新上下文重新生成 3 条英文接话提词" onclick="window.__livehear_action('refreshCopilotPrompts')">
+            🔄 换批提词
+          </button>
+          <button class="copilot-close-btn no-drag" title="收起提词面板" onclick="window.__livehear_action('closeCopilotDrawer')">
+            ✕
+          </button>
+        </div>
       </div>
 
-      <div class="suggestions-list">
-        ${suggestions
-          .map(
-            (sug) => `
-          <div class="suggestion-card no-drag" onclick="window.__livehear_action('copySuggestion', ${sug.id})">
-            <div class="suggestion-meta">
-              <span class="strategy-badge">${escapeHtml(sug.title)}</span>
-              <span class="shortcut-tag">${sug.shortcut}</span>
+      <!-- 自定义发言意图秒转地道外语提词栏 + 随手记笔记 (Hyprnote 风格) -->
+      <div class="copilot-intent-bar">
+        <input type="text"
+               id="copilotIntentInput"
+               class="copilot-intent-input no-drag"
+               value="${escapeHtml(customIntent)}"
+               placeholder="输入中文想法回车秒生英文发言词，或点右侧「记笔记」插入会议时间轴..."
+               onkeydown="if(event.key === 'Enter') window.__livehear_action('submitCopilotIntent')" />
+        <button class="copilot-intent-submit no-drag" onclick="window.__livehear_action('submitCopilotIntent')">
+          ✨ 生成发言词
+        </button>
+        <button class="copilot-note-btn no-drag" title="将输入框内容作为带时间戳的个人备忘插入字幕流，并在会后合并进 AI 纪要" onclick="window.__livehear_action('insertQuickNote')">
+          📌 记笔记
+        </button>
+      </div>
+
+      ${
+        isLoading
+          ? `
+        <div class="copilot-loading-row">
+          <span class="streaming-pulse-cursor"></span>
+          <span>正在结合前序会议对话生成地道双语发言提词...</span>
+        </div>
+      `
+          : `
+        <div class="suggestions-list">
+          ${suggestions
+            .map((sug) => {
+              const { mainText, subNote } = splitBilingualDetail(sug.detail);
+              return `
+            <div class="suggestion-card no-drag" onclick="window.__livehear_action('copySuggestion', ${sug.id})">
+              <div class="suggestion-meta">
+                <span class="strategy-badge">${escapeHtml(sug.title)}</span>
+                <span class="shortcut-tag">${sug.shortcut} · 点击复制英文</span>
+              </div>
+              <div class="suggestion-detail">${escapeHtml(mainText)}</div>
+              ${subNote ? `<div class="suggestion-subnote">💬 ${escapeHtml(subNote)}</div>` : ''}
             </div>
-            <div class="suggestion-detail">${escapeHtml(sug.detail)}</div>
+          `;
+            })
+            .join('')}
+        </div>
+      `
+      }
+    </div>
+  `;
+}
+
+export function renderQuickLangPopoverHtml(config: FullAppConfig): string {
+  const isOneWay = config.soniox.translation_type !== 'two_way';
+  const hintsStr = (config.soniox.language_hints || ['en', 'zh']).join(', ');
+  const isStrict = config.soniox.language_hints_strict !== false;
+  const targetLang = config.soniox.target_language || 'zh';
+
+  const presets = [
+    { label: '中 + 英 (推荐)', val: 'en, zh' },
+    { label: '纯英语会议', val: 'en' },
+    { label: '中 + 英 + 泰', val: 'en, zh, th' },
+    { label: '中 + 英 + 日', val: 'en, zh, ja' },
+  ];
+
+  const targets = [
+    { code: 'zh', label: '中文' },
+    { code: 'en', label: 'English' },
+    { code: 'ja', label: '日本語' },
+    { code: 'th', label: 'ไทย' },
+    { code: 'ko', label: '한국어' },
+    { code: 'fr', label: 'Français' },
+  ];
+
+  return `
+    <div class="quick-lang-popover no-drag" id="quickLangPopover">
+      <div class="ql-header">
+        <span class="ql-title">🎯 识别语种范围 &amp; 目标翻译语言快捷切换</span>
+        <button class="ql-close" onclick="window.__livehear_action('toggleQuickLangPopover')">✕</button>
+      </div>
+
+      <div class="ql-section">
+        <div class="ql-label">1. 收听语种范围 (缩小范围可大幅提升识别精度)</div>
+        <div class="ql-preset-chips">
+          ${presets
+            .map(
+              (p) => `
+            <button class="ql-chip ${hintsStr.replace(/\s+/g, '') === p.val.replace(/\s+/g, '') ? 'active' : ''}"
+                    onclick="window.__livehear_action('selectLangPreset', '${p.val}')">
+              ${escapeHtml(p.label)}
+            </button>
+          `
+            )
+            .join('')}
+        </div>
+        <div class="ql-custom-row">
+          <input type="text" id="quickHintsInput" value="${escapeHtml(hintsStr)}" placeholder="自定义语种代码: en, zh, th, ja, ko..." />
+          <label class="ql-strict-toggle" title="开启后 Soniox 仅在上方指定语种内解码，彻底杜绝乱码">
+            <input type="checkbox" id="quickStrictCheckbox" ${isStrict ? 'checked' : ''} />
+            <span>🔒 严格锁定</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="ql-section">
+        <div class="ql-label">2. 同传方向与目标语言 (Target Language)</div>
+        <div class="ql-mode-row">
+          <button class="ql-mode-btn ${isOneWay ? 'active' : ''}"
+                  onclick="window.__livehear_action('quickSetTransMode', 'one_way')">
+            🌐 单向同传 (外语 ➔ 目标语)
+          </button>
+          <button class="ql-mode-btn ${!isOneWay ? 'active' : ''}"
+                  onclick="window.__livehear_action('quickSetTransMode', 'two_way')">
+            🔄 中 ⇄ 英 双向互译
+          </button>
+        </div>
+        ${
+          isOneWay
+            ? `
+          <div class="ql-target-chips">
+            ${targets
+              .map(
+                (t) => `
+              <button class="ql-target-chip ${targetLang === t.code ? 'active' : ''}"
+                      onclick="window.__livehear_action('quickSetTargetLang', '${t.code}')">
+                ${escapeHtml(t.label)} (${t.code})
+              </button>
+            `
+              )
+              .join('')}
           </div>
         `
-          )
-          .join('')}
+            : ''
+        }
       </div>
+
+      <div class="ql-footer">
+        <span class="ql-tip">修改后点击右侧按钮即刻热重载语音流</span>
+        <button class="btn-primary ql-apply-btn" onclick="window.__livehear_action('applyQuickLangConfig')">
+          ⚡ 立即应用并热切
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+export function renderLookupPopoverHtml(data: SelectionLookupData): string {
+  return `
+    <div class="selection-lookup-popover no-drag"
+         id="selectionLookupPopover"
+         style="left: ${Math.round(data.x)}px; top: ${Math.round(data.y)}px;">
+      <div class="slp-header">
+        <div class="slp-word-wrap">
+          <span class="slp-word">${escapeHtml(data.text)}</span>
+          ${
+            data.phonetic_or_type
+              ? `<span class="slp-phonetic">${escapeHtml(data.phonetic_or_type)}</span>`
+              : ''
+          }
+        </div>
+        <button class="slp-close" onclick="window.__livehear_action('closeSelectionLookup')">✕</button>
+      </div>
+      ${
+        data.loading
+          ? `
+        <div class="slp-loading">
+          <span class="streaming-pulse-cursor"></span>
+          <span>正在结合当前会议语境解析...</span>
+        </div>
+      `
+          : `
+        <div class="slp-meaning">${escapeHtml(data.meaning)}</div>
+        ${
+          data.context_explanation
+            ? `<div class="slp-context">💡 语境解读：${escapeHtml(data.context_explanation)}</div>`
+            : ''
+        }
+        <div class="slp-actions">
+          <button class="slp-btn" onclick="window.__livehear_action('copyText', '${escapeJs(data.meaning)}')">
+            📋 复制释义
+          </button>
+          ${
+            data.term_pair
+              ? `
+            <button class="slp-btn primary" onclick="window.__livehear_action('addTermFromLookup', '${escapeJs(data.term_pair)}')">
+              ➕ 加入术语表 (${escapeHtml(data.term_pair)})
+            </button>
+          `
+              : `
+            <button class="slp-btn primary" onclick="window.__livehear_action('addTermFromLookup', '${escapeJs(`${data.text}=${data.meaning}`)}')">
+              ➕ 加入术语库
+            </button>
+          `
+          }
+        </div>
+      `
+      }
     </div>
   `;
 }
@@ -550,8 +845,11 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
 
             <div class="setting-group">
               <label>预期语种提示 (Language Hints)</label>
-              <input type="text" id="cfgLanguageHints" value="${escapeHtml(hintsStr)}" placeholder="en, zh, th, ja" />
-              <div class="setting-tip">逗号分隔。大幅提升口音混杂会议的识别精度。</div>
+              <input type="text" id="cfgLanguageHints" value="${escapeHtml(hintsStr)}" placeholder="en, zh" />
+              <label class="checkbox-label" style="margin-top: 6px;">
+                <input type="checkbox" id="cfgLanguageHintsStrict" ${config.soniox.language_hints_strict !== false ? 'checked' : ''} />
+                <span>🔒 严格锁定上述语种 (Strict Mode · 杜绝跨语种乱码)</span>
+              </label>
             </div>
           </div>
 
@@ -647,8 +945,23 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
           </div>
 
           <div class="setting-group">
-            <label>麦克风硬件诊断</label>
+            <label>音频输入源与硬件诊断 (支持麦克风 / BlackHole 系统内录切换)</label>
             <div class="mic-diag-card">
+              <div class="setting-group" style="margin-bottom: 6px;">
+                <select id="cfgInputDevice">
+                  <option value="" ${!config.soniox.input_device ? 'selected' : ''}>🎙️ 系统默认输入设备 (Default Input)</option>
+                  ${(state.audioDevices || [])
+                    .map(
+                      (dev) => `
+                    <option value="${escapeHtml(dev)}" ${config.soniox.input_device === dev ? 'selected' : ''}>
+                      ${dev.toLowerCase().includes('blackhole') || dev.toLowerCase().includes('loopback') ? '🔊 [系统内录] ' : '🎤 '}${escapeHtml(dev)}
+                    </option>
+                  `
+                    )
+                    .join('')}
+                </select>
+                <div class="setting-tip">戴耳机开会时，可切换至 BlackHole / Loopback 等虚拟内录设备以直接捕获 100% 纯净系统原声。</div>
+              </div>
               <div class="mic-status-row">
                 <span>macOS 麦克风授权:</span>
                 <span class="${state.hasMicPermission ? 'text-success' : 'text-danger'}">
@@ -674,10 +987,13 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
           <div class="setting-group">
             <label>全局快捷键</label>
             <div class="shortcuts-guide-card">
+              <div class="shortcut-item"><span>⌘ + K</span><span>一键唤起「帮我接话」发言提词 / 浓缩前文</span></div>
+              <div class="shortcut-item"><span>⌘ + Shift + H</span><span>投屏隐身防录屏模式 (共享桌面时隐藏此窗)</span></div>
+              <div class="shortcut-item"><span>⌘ + Shift + X</span><span>开启 / 关闭鼠标穿透幽灵模式</span></div>
               <div class="shortcut-item"><span>⌘ + Shift + P</span><span>窗口置顶固定 / 取消置顶</span></div>
               <div class="shortcut-item"><span>⌘ + Shift + C</span><span>一键清空当前字幕流</span></div>
-              <div class="shortcut-item"><span>⌘ + Shift + E</span><span>一键导出会议 Markdown 纪要</span></div>
-              <div class="shortcut-item"><span>⌘ + 1 / 2 / 3</span><span>快速复制第 1 / 2 / 3 条策略回复</span></div>
+              <div class="shortcut-item"><span>⌘ + Shift + E</span><span>一键导出 AI 结构化会议纪要</span></div>
+              <div class="shortcut-item"><span>⌘ + 1 / 2 / 3</span><span>快速复制第 1 / 2 / 3 条提词或回复</span></div>
             </div>
           </div>
         </div>

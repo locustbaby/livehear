@@ -4,11 +4,15 @@ import {
   renderEmptyPlaceholder,
   renderSuggestionsHtml,
   renderSettingsModalHtml,
+  renderQuickLangPopoverHtml,
+  renderLookupPopoverHtml,
+  formatTopbarLangBadgeText,
   type HudState,
   type SubtitleItem,
   type SubtitleDisplayMode,
+  type SelectionLookupData,
 } from './components/hud';
-import type { FullAppConfig } from './components/studio';
+import type { FullAppConfig } from './types/domain';
 
 // 安全调用 Tauri API
 async function tauriInvoke<T>(cmd: string, args?: Record<string, any>): Promise<T> {
@@ -186,7 +190,8 @@ class LiveHearApp {
       model: 'stt-rt-v5',
       sample_rate: 16000,
       enable_speaker_diarization: true,
-      language_hints: ['en', 'zh', 'th'],
+      language_hints: ['en', 'zh'],
+      language_hints_strict: true,
       enable_translation: true,
       translation_type: 'one_way',
       target_language: 'zh',
@@ -243,6 +248,7 @@ class LiveHearApp {
     this.detectPlatform();
     this.bindGlobalHandlers();
     this.bindKeyboardShortcuts();
+    this.bindSelectionLookupListener();
     this.initTauriListeners();
     this.initialRender();
     this.loadConfigAndAutoStart();
@@ -302,6 +308,7 @@ class LiveHearApp {
           jev: { ...this.appConfig.jev, ...cfg.jev },
           meeting: { ...this.appConfig.meeting, ...cfg.meeting },
         };
+        this.refreshTopbarBadges();
       }
     } catch (e) {
       console.warn('读取配置失败:', e);
@@ -558,6 +565,9 @@ class LiveHearApp {
           const original = stripControl(segment.text).trim();
           const translated = stripControl(segment.translated_text).trim();
           const detectedLanguage = segment.detected_language;
+          const lowConfidenceWords: string[] = Array.isArray(segment.low_confidence_words)
+            ? segment.low_confidence_words
+            : [];
 
           if (!original && !translated) return;
 
@@ -579,6 +589,11 @@ class LiveHearApp {
               target.isPartial = false;
               target.isPolished = false;
               target.lastUpdatedMs = nowMs;
+              if (lowConfidenceWords.length > 0) {
+                target.lowConfidenceWords = Array.from(
+                  new Set([...(target.lowConfidenceWords || []), ...lowConfidenceWords])
+                );
+              }
 
               this.streamManager.finalizeLastCard(target, this.hudState.displayMode);
               this.scheduleTurnPolish(target);
@@ -607,6 +622,7 @@ class LiveHearApp {
             isPartial: false,
             isContinuation: computeContinuation(speaker, rawTurnId, nowMs),
             lastUpdatedMs: nowMs,
+            lowConfidenceWords,
           };
 
           if (existingIdx >= 0) {
@@ -656,15 +672,31 @@ class LiveHearApp {
   private bindKeyboardShortcuts() {
     window.addEventListener('keydown', (e) => {
       const isCmd = e.metaKey || e.ctrlKey;
+      if (e.key === 'Escape') {
+        this.closeSelectionLookup();
+        if (this.hudState.isQuickLangOpen) {
+          this.handleAction('toggleQuickLangPopover');
+        }
+        return;
+      }
       if (isCmd && e.shiftKey && e.code === 'KeyP') {
         e.preventDefault();
         this.handleAction('toggleTopmost');
+      } else if (isCmd && e.shiftKey && e.code === 'KeyH') {
+        e.preventDefault();
+        this.handleAction('toggleStealthMode');
+      } else if (isCmd && e.shiftKey && e.code === 'KeyX') {
+        e.preventDefault();
+        this.handleAction('toggleClickThrough');
       } else if (isCmd && e.shiftKey && e.code === 'KeyC') {
         e.preventDefault();
         this.handleAction('clearSubtitles');
       } else if (isCmd && e.shiftKey && e.code === 'KeyE') {
         e.preventDefault();
         this.handleAction('exportTranscript');
+      } else if (isCmd && e.code === 'KeyK') {
+        e.preventDefault();
+        this.handleAction('openCopilotDrawer');
       } else if (isCmd && e.key === ',') {
         e.preventDefault();
         this.handleAction('toggleSettings');
@@ -679,13 +711,197 @@ class LiveHearApp {
     });
   }
 
-  private renderSuggestionDrawer(suggestions: any[], intent?: string) {
+  private bindSelectionLookupListener() {
+    let lookupDebounce: any = null;
+
+    const handleTriggerLookup = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (
+        target.closest('#selectionLookupPopover') ||
+        target.closest('#quickLangPopover') ||
+        target.closest('button') ||
+        target.closest('input') ||
+        target.closest('textarea')
+      ) {
+        return;
+      }
+
+      const streamEl = document.getElementById('subtitlesStream');
+      if (!streamEl || !streamEl.contains(target)) {
+        this.closeSelectionLookup();
+        return;
+      }
+
+      if (lookupDebounce) clearTimeout(lookupDebounce);
+      lookupDebounce = setTimeout(async () => {
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed) return;
+        const selectedText = sel.toString().trim();
+        if (selectedText.length < 2 || selectedText.length > 180) return;
+
+        let rect: DOMRect | null = null;
+        try {
+          rect = sel.getRangeAt(0).getBoundingClientRect();
+        } catch {
+          return;
+        }
+        if (!rect || (rect.width === 0 && rect.height === 0)) return;
+
+        const turnBlock = target.closest('.stream-turn-block') as HTMLElement | null;
+        const turnId = turnBlock?.getAttribute('data-id');
+        const subItem = turnId ? this.hudState.subtitles.find((s) => s.id === turnId) : undefined;
+        const sentenceContext = subItem
+          ? `原声: ${subItem.original || ''} | 译文: ${subItem.translated || ''}`
+          : turnBlock?.innerText || '';
+
+        const popX = Math.max(14, Math.min(window.innerWidth - 340, rect.left));
+        const popY =
+          rect.bottom + 150 > window.innerHeight
+            ? Math.max(46, rect.top - 135)
+            : rect.bottom + 8;
+
+        this.renderSelectionLookup({
+          text: selectedText,
+          phonetic_or_type: '',
+          meaning: '',
+          context_explanation: '',
+          loading: true,
+          x: popX,
+          y: popY,
+        });
+
+        try {
+          const result = await tauriInvoke<{
+            text: string;
+            phonetic_or_type: string;
+            meaning: string;
+            context_explanation: string;
+            term_pair?: string | null;
+          }>('lookup_selection', {
+            selection: selectedText,
+            sentenceContext,
+          });
+          this.renderSelectionLookup({
+            ...result,
+            loading: false,
+            x: popX,
+            y: popY,
+          });
+        } catch (err: any) {
+          this.renderSelectionLookup({
+            text: selectedText,
+            phonetic_or_type: '查词提示',
+            meaning: err?.message || '请先在设置中配置 AI 智囊 API Key',
+            context_explanation: '',
+            loading: false,
+            x: popX,
+            y: popY,
+          });
+        }
+      }, 140);
+    };
+
+    document.addEventListener('mouseup', handleTriggerLookup);
+    document.addEventListener('dblclick', handleTriggerLookup);
+    document.addEventListener('mousedown', (e) => {
+      const target = e.target as HTMLElement | null;
+      if (target && !target.closest('#selectionLookupPopover')) {
+        const container = document.getElementById('selectionLookupContainer');
+        if (container && container.innerHTML) {
+          this.closeSelectionLookup();
+        }
+      }
+      if (
+        this.hudState.isQuickLangOpen &&
+        target &&
+        !target.closest('#quickLangPopover') &&
+        !target.closest('#btnQuickLangPill')
+      ) {
+        this.hudState.isQuickLangOpen = false;
+        const qlContainer = document.getElementById('quickLangPopoverContainer');
+        if (qlContainer) qlContainer.innerHTML = '';
+      }
+    });
+  }
+
+  private renderSelectionLookup(data: SelectionLookupData) {
+    const container = document.getElementById('selectionLookupContainer');
+    if (container) {
+      container.innerHTML = renderLookupPopoverHtml(data);
+    }
+  }
+
+  private closeSelectionLookup() {
+    const container = document.getElementById('selectionLookupContainer');
+    if (container) {
+      container.innerHTML = '';
+    }
+  }
+
+  private renderSuggestionDrawer(
+    suggestions: any[],
+    intent?: string,
+    isLoading = false,
+    customIntent = ''
+  ) {
     this.hudState.suggestions = suggestions;
     this.hudState.hasPredictSuggestion = true;
     this.hudState.intentCategory = intent;
+    this.hudState.isCopilotLoading = isLoading;
     const container = document.getElementById('predictDrawerContainer');
     if (container) {
-      container.innerHTML = renderSuggestionsHtml(suggestions, intent);
+      container.innerHTML = renderSuggestionsHtml(suggestions, intent, isLoading, customIntent);
+    }
+    document.getElementById('btnOpenCopilot')?.classList.add('active');
+  }
+
+  private async requestCopilotPrompts(customIntent?: string, focusTurnId?: string) {
+    const label = customIntent
+      ? `自定义意图: ${customIntent.slice(0, 12)}`
+      : focusTurnId
+      ? '针对单句回应'
+      : '结合上文提词';
+
+    this.renderSuggestionDrawer(this.hudState.suggestions, label, true, customIntent || '');
+
+    let contextSlice = this.hudState.subtitles.filter(
+      (s) => s.original || s.translated
+    );
+    if (focusTurnId) {
+      const idx = contextSlice.findIndex((s) => s.id === focusTurnId);
+      if (idx >= 0) {
+        contextSlice = contextSlice.slice(Math.max(0, idx - 4), idx + 1);
+      }
+    } else {
+      contextSlice = contextSlice.slice(-6);
+    }
+
+    const recentHistory = contextSlice
+      .map((s) => {
+        const o = (s.original || '').trim();
+        const t = (s.translated || '').trim();
+        const mark = focusTurnId && s.id === focusTurnId ? '【对方刚说·需回应】' : '';
+        return t && t !== o
+          ? `${mark}[${s.speaker}] 原声: ${o} | 译文: ${t}`
+          : `${mark}[${s.speaker}]: ${o}`;
+      })
+      .join('\n');
+
+    try {
+      const suggestions = await tauriInvoke<any[]>('generate_copilot_prompts', {
+        recentHistory,
+        userIntent: customIntent && customIntent.trim() ? customIntent.trim() : null,
+      });
+      this.renderSuggestionDrawer(suggestions, label, false, customIntent || '');
+    } catch (err: any) {
+      this.renderSuggestionDrawer(
+        this.hudState.suggestions,
+        label,
+        false,
+        customIntent || ''
+      );
+      this.showToast(`⚠️ 生成提词失败: ${err?.message || err}`);
     }
   }
 
@@ -694,9 +910,16 @@ class LiveHearApp {
     if (!item.original || !item.translated || item.isPartial) return;
     if (!this.appConfig.openrouter?.api_key?.trim()) return;
 
-    // 仅针对有一定长度的外语发言进行中文重组与润色（至少4个单词）
-    const wordCount = item.original.trim().split(/\s+/).length;
-    if (wordCount < 4) return;
+    const origTrimmed = item.original.trim();
+    const wordCount = origTrimmed.split(/\s+/).filter(Boolean).length;
+    const cjkCount = (origTrimmed.match(/[\u4e00-\u9fff]/g) || []).length;
+    const hasLowConf = Boolean(item.lowConfidenceWords && item.lowConfidenceWords.length > 0);
+    // 若包含声学低置信度词，则放宽长度门限（外语 >= 2 词或中文 >= 4 字即触发纠偏）；否则常规门限（>= 4 词或 >= 8 字）
+    if (hasLowConf) {
+      if (wordCount < 2 && cjkCount < 4) return;
+    } else if (wordCount < 4 && cjkCount < 8) {
+      return;
+    }
 
     if (this.polishTimer) {
       clearTimeout(this.polishTimer);
@@ -706,24 +929,57 @@ class LiveHearApp {
     const targetTurnId = item.id;
     this.polishTimer = setTimeout(async () => {
       try {
-        const polished = await tauriInvoke<string>('polish_transcript', {
-          original: item.original,
-          draft: item.translated,
+        const curIdx = this.hudState.subtitles.findIndex((s) => s.id === targetTurnId);
+        const curItem = curIdx >= 0 ? this.hudState.subtitles[curIdx] : item;
+        const prevTurns =
+          curIdx > 0
+            ? this.hudState.subtitles
+                .slice(Math.max(0, curIdx - 4), curIdx)
+                .filter((s) => !s.isPartial && (s.original || s.translated))
+                .map((s) => {
+                  const o = (s.original || '').trim();
+                  const t = (s.translated || '').trim();
+                  return t && t !== o ? `[${s.speaker}] 原声: ${o} | 译文: ${t}` : `[${s.speaker}]: ${o}`;
+                })
+                .join('\n')
+            : '';
+
+        const res = await tauriInvoke<
+          { original?: string; translated?: string; tone_tag?: string | null } | string
+        >('polish_transcript', {
+          original: curItem.original,
+          draft: curItem.translated,
+          recentHistory: prevTurns,
+          lowConfidenceWords: curItem.lowConfidenceWords || [],
         });
 
-        if (polished && polished.trim() && polished.trim() !== item.translated) {
-          const cur = this.hudState.subtitles.find((s) => s.id === targetTurnId);
-          if (cur) {
-            cur.translated = polished.trim();
-            cur.confirmedTranslated = cur.translated;
-            cur.isPolished = true;
-            this.streamManager.updateLastFinalTurn(cur, this.hudState.displayMode);
-          }
+        const cur = this.hudState.subtitles.find((s) => s.id === targetTurnId);
+        if (!cur) return;
+
+        let nextOrig = cur.original;
+        let nextTrans = cur.translated;
+        let nextTone = cur.toneTag;
+        if (typeof res === 'string') {
+          if (res.trim()) nextTrans = res.trim();
+        } else if (res && typeof res === 'object') {
+          if (res.original && res.original.trim()) nextOrig = res.original.trim();
+          if (res.translated && res.translated.trim()) nextTrans = res.translated.trim();
+          if (res.tone_tag && res.tone_tag.trim()) nextTone = res.tone_tag.trim();
+        }
+
+        if (nextOrig !== cur.original || nextTrans !== cur.translated || nextTone !== cur.toneTag) {
+          cur.original = nextOrig;
+          cur.confirmedOriginal = nextOrig;
+          cur.translated = nextTrans;
+          cur.confirmedTranslated = nextTrans;
+          cur.toneTag = nextTone;
+          cur.isPolished = true;
+          this.streamManager.updateLastFinalTurn(cur, this.hudState.displayMode);
         }
       } catch (err) {
         console.warn('AI 润色串联跳过或失败:', err);
       }
-    }, 900);
+    }, 750);
   }
 
   private async handleAction(action: string, payload?: any, extra?: any) {
@@ -748,6 +1004,14 @@ class LiveHearApp {
 
       case 'toggleSettings':
         this.hudState.isSettingsOpen = !this.hudState.isSettingsOpen;
+        if (this.hudState.isSettingsOpen) {
+          try {
+            const devices = await tauriInvoke<string[]>('list_audio_devices');
+            if (Array.isArray(devices)) {
+              this.hudState.audioDevices = devices;
+            }
+          } catch {}
+        }
         const overlayContainer = document.getElementById('settingsOverlayContainer');
         const btnToggleSettings = document.getElementById('btnToggleSettings');
         if (btnToggleSettings) {
@@ -789,10 +1053,248 @@ class LiveHearApp {
       case 'copySuggestion':
         const item = this.hudState.suggestions.find((s) => s.id === payload);
         if (item) {
-          navigator.clipboard.writeText(item.detail);
-          this.showToast(`已复制: "${item.title}"`);
+          const cleanSpoken = item.detail.replace(/\s*[\(（][^\)）]+[\)）]\s*$/, '').trim();
+          navigator.clipboard.writeText(cleanSpoken || item.detail);
+          this.showToast(`✅ 已复制发言词: "${cleanSpoken || item.title}"`);
         }
         break;
+
+      case 'toggleQuickLangPopover':
+        this.hudState.isQuickLangOpen = !this.hudState.isQuickLangOpen;
+        const qlContainer = document.getElementById('quickLangPopoverContainer');
+        if (qlContainer) {
+          qlContainer.innerHTML = this.hudState.isQuickLangOpen
+            ? renderQuickLangPopoverHtml(this.appConfig)
+            : '';
+        }
+        break;
+
+      case 'selectLangPreset':
+        if (typeof payload === 'string') {
+          this.appConfig.soniox.language_hints = payload
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
+          const qlEl = document.getElementById('quickLangPopoverContainer');
+          if (qlEl) qlEl.innerHTML = renderQuickLangPopoverHtml(this.appConfig);
+        }
+        break;
+
+      case 'quickSetTransMode':
+        if (payload === 'one_way' || payload === 'two_way') {
+          const hintsBox = document.getElementById('quickHintsInput') as HTMLInputElement | null;
+          if (hintsBox) {
+            this.appConfig.soniox.language_hints = hintsBox.value
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean);
+          }
+          const strictBox = document.getElementById('quickStrictCheckbox') as HTMLInputElement | null;
+          if (strictBox) {
+            this.appConfig.soniox.language_hints_strict = strictBox.checked;
+          }
+          this.appConfig.soniox.translation_type = payload;
+          const qlEl = document.getElementById('quickLangPopoverContainer');
+          if (qlEl) qlEl.innerHTML = renderQuickLangPopoverHtml(this.appConfig);
+        }
+        break;
+
+      case 'quickSetTargetLang':
+        if (typeof payload === 'string') {
+          const hintsBox = document.getElementById('quickHintsInput') as HTMLInputElement | null;
+          if (hintsBox) {
+            this.appConfig.soniox.language_hints = hintsBox.value
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean);
+          }
+          const strictBox = document.getElementById('quickStrictCheckbox') as HTMLInputElement | null;
+          if (strictBox) {
+            this.appConfig.soniox.language_hints_strict = strictBox.checked;
+          }
+          this.appConfig.soniox.target_language = payload;
+          const qlEl = document.getElementById('quickLangPopoverContainer');
+          if (qlEl) qlEl.innerHTML = renderQuickLangPopoverHtml(this.appConfig);
+        }
+        break;
+
+      case 'applyQuickLangConfig': {
+        const hintsBox = document.getElementById('quickHintsInput') as HTMLInputElement | null;
+        if (hintsBox) {
+          this.appConfig.soniox.language_hints = hintsBox.value
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
+        }
+        const strictBox = document.getElementById('quickStrictCheckbox') as HTMLInputElement | null;
+        if (strictBox) {
+          this.appConfig.soniox.language_hints_strict = strictBox.checked;
+        }
+        this.hudState.isQuickLangOpen = false;
+        const qlEl = document.getElementById('quickLangPopoverContainer');
+        if (qlEl) qlEl.innerHTML = '';
+
+        try {
+          await tauriInvoke('save_config', { newConfig: this.appConfig });
+          this.refreshTopbarBadges();
+          if (this.hudState.isStreaming) {
+            await this.stopLiveStream(false);
+            await this.startLiveStream();
+            this.showToast('⚡ 已应用语种配置并热切同传流！');
+          } else {
+            this.showToast('✅ 语种与目标语言配置已更新');
+          }
+        } catch (err: any) {
+          this.showToast(`⚠️ 更新失败: ${err?.message || err}`);
+        }
+        break;
+      }
+
+      case 'closeSelectionLookup':
+        this.closeSelectionLookup();
+        break;
+
+      case 'addTermFromLookup':
+        if (typeof payload === 'string' && payload.trim()) {
+          const term = payload.trim();
+          const existing = this.appConfig.soniox.custom_terms || [];
+          if (!existing.includes(term)) {
+            this.appConfig.soniox.custom_terms = [...existing, term];
+            try {
+              await tauriInvoke('save_config', { newConfig: this.appConfig });
+            } catch {}
+          }
+          this.closeSelectionLookup();
+          this.showToast(`✅ 已将「${term}」加入会议术语表`);
+        }
+        break;
+
+      case 'openCopilotDrawer':
+      case 'refreshCopilotPrompts':
+        await this.requestCopilotPrompts();
+        break;
+
+      case 'summarizeRecentContext': {
+        this.renderSuggestionDrawer(this.hudState.suggestions, '📝 3秒浓缩前文 (TL;DR)', true);
+        const recentSlice = this.hudState.subtitles
+          .filter((s) => s.original || s.translated)
+          .slice(-14)
+          .map((s) => {
+            const o = (s.original || '').trim();
+            const t = (s.translated || '').trim();
+            return t && t !== o ? `[${s.speaker}] 原声: ${o} | 译文: ${t}` : `[${s.speaker}]: ${o}`;
+          })
+          .join('\n');
+
+        try {
+          const cards = await tauriInvoke<any[]>('summarize_meeting_context', {
+            recentHistory: recentSlice,
+          });
+          this.renderSuggestionDrawer(cards, '📝 3秒浓缩前文 (TL;DR)', false);
+        } catch (err: any) {
+          this.renderSuggestionDrawer(this.hudState.suggestions, '📝 3秒浓缩前文 (TL;DR)', false);
+          this.showToast(`⚠️ 浓缩前文失败: ${err?.message || err}`);
+        }
+        break;
+      }
+
+      case 'toggleStealthMode': {
+        this.hudState.isStealthMode = !this.hudState.isStealthMode;
+        const stealthBtn = document.getElementById('btnToggleStealth');
+        if (stealthBtn) {
+          if (this.hudState.isStealthMode) {
+            stealthBtn.classList.add('active', 'stealth-active');
+          } else {
+            stealthBtn.classList.remove('active', 'stealth-active');
+          }
+        }
+        try {
+          await tauriInvoke('set_stealth_mode', { enabled: Boolean(this.hudState.isStealthMode) });
+          this.showToast(
+            this.hudState.isStealthMode
+              ? '🕶️ 投屏隐身已开启：共享屏幕/截图时此窗口完全隐形'
+              : '已关闭投屏隐身模式'
+          );
+        } catch (err: any) {
+          this.showToast(`⚠️ 设置投屏隐身失败: ${err?.message || err}`);
+        }
+        break;
+      }
+
+      case 'toggleClickThrough': {
+        this.hudState.isClickThrough = !this.hudState.isClickThrough;
+        const ctBtn = document.getElementById('btnToggleClickThrough');
+        const hudWin = document.querySelector('.hud-window');
+        if (ctBtn) {
+          if (this.hudState.isClickThrough) ctBtn.classList.add('active');
+          else ctBtn.classList.remove('active');
+        }
+        if (hudWin) {
+          if (this.hudState.isClickThrough) hudWin.classList.add('is-click-through');
+          else hudWin.classList.remove('is-click-through');
+        }
+        try {
+          await tauriInvoke('set_click_through', { enabled: Boolean(this.hudState.isClickThrough) });
+          this.showToast(
+            this.hudState.isClickThrough
+              ? '👻 鼠标穿透已开启 (按 ⌘+Shift+X 随时恢复交互)'
+              : '已退出鼠标穿透，恢复窗口点击交互'
+          );
+        } catch (err: any) {
+          this.showToast(`⚠️ 设置鼠标穿透失败: ${err?.message || err}`);
+        }
+        break;
+      }
+
+      case 'promptReplyForTurn':
+        if (typeof payload === 'string') {
+          await this.requestCopilotPrompts(undefined, payload);
+        }
+        break;
+
+      case 'submitCopilotIntent': {
+        const inputEl = document.getElementById('copilotIntentInput') as HTMLInputElement | null;
+        const val = inputEl ? inputEl.value.trim() : '';
+        await this.requestCopilotPrompts(val || undefined);
+        break;
+      }
+
+      case 'insertQuickNote': {
+        const inputEl = document.getElementById('copilotIntentInput') as HTMLInputElement | null;
+        const noteText = inputEl ? inputEl.value.trim() : '';
+        if (!noteText) {
+          this.showToast('💡 请先在输入框填写要记录的会议笔记内容');
+          return;
+        }
+        const nowMs = Date.now();
+        const noteItem: SubtitleItem = {
+          id: `note-${nowMs}`,
+          speaker: '📝 会议备忘',
+          isTrackRemote: false,
+          original: noteText,
+          translated: noteText,
+          confirmedOriginal: noteText,
+          confirmedTranslated: noteText,
+          detectedLanguage: 'zh',
+          timestamp: new Date().toLocaleTimeString(),
+          isPartial: false,
+          toneTag: '📌 重点笔记',
+          lastUpdatedMs: nowMs,
+        };
+        this.hudState.subtitles.push(noteItem);
+        this.streamManager.finalizeLastCard(noteItem, this.hudState.displayMode);
+        if (inputEl) inputEl.value = '';
+        this.showToast('📌 已将笔记插入会议时间轴（导出纪要时将自动合并）');
+        break;
+      }
+
+      case 'closeCopilotDrawer': {
+        this.hudState.hasPredictSuggestion = false;
+        const pred = document.getElementById('predictDrawerContainer');
+        if (pred) pred.innerHTML = '';
+        document.getElementById('btnOpenCopilot')?.classList.remove('active');
+        break;
+      }
 
       case 'setSubtitleMode':
         this.hudState.displayMode = payload as SubtitleDisplayMode;
@@ -900,6 +1402,11 @@ class LiveHearApp {
             .filter(Boolean);
         }
 
+        const strictHintsCb = document.getElementById('cfgLanguageHintsStrict') as HTMLInputElement;
+        if (strictHintsCb) {
+          this.appConfig.soniox.language_hints_strict = strictHintsCb.checked;
+        }
+
         const endpointDelaySelect = document.getElementById('cfgEndpointDelay') as HTMLSelectElement;
         if (endpointDelaySelect) {
           const parsedDelay = parseInt(endpointDelaySelect.value, 10);
@@ -916,6 +1423,12 @@ class LiveHearApp {
         const vadCheckbox = document.getElementById('cfgEnableVad') as HTMLInputElement;
         if (vadCheckbox) {
           this.appConfig.soniox.enable_vad = vadCheckbox.checked;
+        }
+
+        const inputDeviceSelect = document.getElementById('cfgInputDevice') as HTMLSelectElement;
+        if (inputDeviceSelect) {
+          const devVal = inputDeviceSelect.value.trim();
+          this.appConfig.soniox.input_device = devVal ? devVal : null;
         }
 
         const termsArea = document.getElementById('cfgCustomTerms') as HTMLTextAreaElement;
@@ -992,15 +1505,41 @@ class LiveHearApp {
     if (langBadge) {
       langBadge.setAttribute(
         'title',
-        isOneWay ? '涉外会议单向同传：外语全部实时同传为目标语言' : '双向对谈：中英双向互译'
+        isOneWay
+          ? '点击快速切换收听语种范围 (Language Hints) 与目标翻译语言'
+          : '双向对谈：点击快速切换收听语种与翻译模式'
       );
-      langBadge.innerHTML = `<span class="globe-icon">🌐</span><span>${
-        isOneWay ? '全语种 ➔ 中文同传' : '中 ⇄ 英 双向互译'
-      }</span>`;
+      langBadge.innerHTML = `<span class="globe-icon">🌐</span><span id="topbarLangBadgeText">${escapeHtml(
+        formatTopbarLangBadgeText(this.appConfig)
+      )}</span>`;
     }
   }
 
-  private generateTranscriptText(): string {
+  private async fetchAiExecutiveSummary(): Promise<string> {
+    if (!this.appConfig.openrouter?.api_key?.trim() || this.hudState.subtitles.length < 2) {
+      return '';
+    }
+    const rawLines = this.hudState.subtitles
+      .map((s) => {
+        const o = (s.original || '').trim();
+        const t = (s.translated || '').trim();
+        return t && t !== o
+          ? `[${s.timestamp}] ${s.speaker}: ${o} (同传: ${t})`
+          : `[${s.timestamp}] ${s.speaker}: ${o}`;
+      })
+      .join('\n');
+    try {
+      const summary = await tauriInvoke<string>('generate_ai_minutes', {
+        transcript: rawLines,
+      });
+      return summary ? summary.trim() : '';
+    } catch (e) {
+      console.warn('AI 结构化纪要提炼跳过:', e);
+      return '';
+    }
+  }
+
+  private generateTranscriptText(aiSummary = ''): string {
     const now = new Date();
     const dateStr = now.toLocaleDateString();
     const timeStr = now.toLocaleTimeString();
@@ -1016,6 +1555,12 @@ class LiveHearApp {
     lines.push(`会议主题: ${this.appConfig.meeting.context || '日常同步'}`);
     lines.push(`参会发言人: ${distinctSpeakers || '未知'}`);
     lines.push('================================================================================\n');
+
+    if (aiSummary) {
+      lines.push('【AI 结构化高管纪要 · 核心决议与待办】\n');
+      lines.push(aiSummary);
+      lines.push('\n--------------------------------------------------------------------------------\n');
+    }
 
     lines.push('【逐字记录与双语同传】\n');
     for (const item of this.hudState.subtitles) {
@@ -1044,7 +1589,7 @@ class LiveHearApp {
     return lines.join('\n');
   }
 
-  private generateTranscriptMarkdown(): string {
+  private generateTranscriptMarkdown(aiSummary = ''): string {
     const now = new Date();
     const dateStr = now.toLocaleDateString();
     const timeStr = now.toLocaleTimeString();
@@ -1058,6 +1603,11 @@ class LiveHearApp {
     md += `- **会议主题**: ${this.appConfig.meeting.context}\n`;
     md += `- **同传引擎**: Soniox v5 (全语种原生识别 + 说话人声纹分离)\n`;
     md += `- **参会发言人**: ${distinctSpeakers || '未知'}\n\n`;
+
+    if (aiSummary) {
+      md += `---\n\n## ✨ AI 高管纪要与待办提炼\n\n${aiSummary}\n\n`;
+    }
+
     md += `---\n\n## 逐字记录与双语同传\n\n`;
     md += `| 时间 | 发言人 | 语种 | 原生发言 | 中文同传 |\n`;
     md += `| :--- | :--- | :--- | :--- | :--- |\n`;
@@ -1088,9 +1638,10 @@ class LiveHearApp {
     const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
     const filename = `Meeting_${ts}.${fileFormat}`;
 
+    const aiSummary = await this.fetchAiExecutiveSummary();
     const content = fileFormat === 'md'
-      ? this.generateTranscriptMarkdown()
-      : this.generateTranscriptText();
+      ? this.generateTranscriptMarkdown(aiSummary)
+      : this.generateTranscriptText(aiSummary);
 
     try {
       const savedPath = await tauriInvoke<string>('save_meeting_transcript', {
@@ -1115,6 +1666,7 @@ class LiveHearApp {
       return;
     }
 
+    this.showToast('✨ 正在提炼 AI 结构化纪要并导出...');
     const saveDir = this.appConfig.storage?.save_dir || '~/Documents/livehear';
     const fileFormat = this.appConfig.storage?.file_format || 'txt';
     const now = new Date();
@@ -1122,9 +1674,10 @@ class LiveHearApp {
     const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
     const filename = `Meeting_${ts}.${fileFormat}`;
 
+    const aiSummary = await this.fetchAiExecutiveSummary();
     const content = fileFormat === 'md'
-      ? this.generateTranscriptMarkdown()
-      : this.generateTranscriptText();
+      ? this.generateTranscriptMarkdown(aiSummary)
+      : this.generateTranscriptText(aiSummary);
 
     try {
       const savedPath = await tauriInvoke<string>('save_meeting_transcript', {
