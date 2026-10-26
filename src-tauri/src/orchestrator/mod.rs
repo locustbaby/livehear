@@ -2,10 +2,10 @@ use crate::domain::{LiveHearError, ReplySuggestion, TranscriptSegment};
 use crate::services::audio_capture::NativeAudioCapture;
 use crate::services::{ASRService, DecisionGateService, PredictService, TranslationService};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestratedEventPayload {
@@ -14,6 +14,31 @@ pub struct OrchestratedEventPayload {
     pub intent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggestions: Option<Vec<ReplySuggestion>>,
+    #[serde(default)]
+    pub sequence_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuggestionsEventPayload {
+    pub segment_id: String,
+    pub intent: String,
+    pub suggestions: Vec<ReplySuggestion>,
+}
+
+fn should_evaluate_for_prediction(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let char_count = trimmed.chars().count();
+    if char_count < 4 {
+        return false;
+    }
+    if trimmed.contains('?') || trimmed.contains('？') {
+        return true;
+    }
+    let word_count = trimmed.split_whitespace().count();
+    word_count >= 3 || char_count >= 8
 }
 
 pub struct LiveHearOrchestrator {
@@ -23,8 +48,13 @@ pub struct LiveHearOrchestrator {
     predict_service: Arc<dyn PredictService>,
     meeting_context: String,
     auto_predict: bool,
+    source_language: String,
+    target_language: String,
+    enable_vad: bool,
+    vad_threshold: f32,
     is_running: Arc<AtomicBool>,
-    has_stopped_native: Arc<AtomicBool>,
+    stop_notify: Arc<Notify>,
+    sequence_counter: Arc<AtomicU64>,
     audio_tx: tokio::sync::Mutex<Option<mpsc::Sender<Vec<u8>>>>,
     audio_capture: tokio::sync::Mutex<NativeAudioCapture>,
 }
@@ -37,6 +67,10 @@ impl LiveHearOrchestrator {
         predict_service: Arc<dyn PredictService>,
         meeting_context: String,
         auto_predict: bool,
+        source_language: String,
+        target_language: String,
+        enable_vad: bool,
+        vad_threshold: f32,
     ) -> Self {
         Self {
             asr_service,
@@ -45,8 +79,13 @@ impl LiveHearOrchestrator {
             predict_service,
             meeting_context,
             auto_predict,
+            source_language,
+            target_language,
+            enable_vad,
+            vad_threshold,
             is_running: Arc::new(AtomicBool::new(false)),
-            has_stopped_native: Arc::new(AtomicBool::new(false)),
+            stop_notify: Arc::new(Notify::new()),
+            sequence_counter: Arc::new(AtomicU64::new(1)),
             audio_tx: tokio::sync::Mutex::new(None),
             audio_capture: tokio::sync::Mutex::new(NativeAudioCapture::new()),
         }
@@ -58,106 +97,180 @@ impl LiveHearOrchestrator {
             return Ok(());
         }
 
-        let (audio_sender, mut transcript_rx) = self.asr_service.start_stream().await?;
+        let _ = app.emit("asr-status", "connecting");
+
+        // 1. 建立 ASR 流式识别通道
+        let (audio_sender, mut transcript_rx) = match self.asr_service.start_stream().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                let _ = app.emit("asr-status", "error");
+                let _ = app.emit("asr-error", e.to_string());
+                return Err(e);
+            }
+        };
+
         {
             let mut lock = self.audio_tx.lock().await;
             *lock = Some(audio_sender.clone());
         }
 
-        // 启动系统原生麦克风实时高保真采集 (cpal)
+        // 2. 启动系统原生麦克风实时高保真采集 (cpal + 智能静音门禁降费)
         {
             let mut cap = self.audio_capture.lock().await;
-            if let Err(e) = cap.start(audio_sender) {
-                eprintln!("⚠️ [LiveHear] 原生麦克风启动警告 (将回退至 IPC 输入): {}", e);
+            if let Err(e) = cap.start(audio_sender, app.clone(), self.enable_vad, self.vad_threshold) {
+                let err_msg = format!("麦克风启动失败: {}", e);
+                eprintln!("⚠️ [LiveHear] {}", err_msg);
+                let _ = app.emit("asr-status", "error");
+                let _ = app.emit("asr-error", err_msg.clone());
+                return Err(LiveHearError::AudioCaptureError(err_msg));
             }
         }
 
         self.is_running.store(true, Ordering::SeqCst);
-        let is_running_clone = self.is_running.clone();
+        let _ = app.emit("asr-status", "connected");
 
+        let is_running_clone = self.is_running.clone();
+        let stop_notify = self.stop_notify.clone();
         let translation_svc = self.translation_service.clone();
         let decision_svc = self.decision_service.clone();
         let predict_svc = self.predict_service.clone();
         let context = self.meeting_context.clone();
         let auto_predict = self.auto_predict;
+        let src_lang = self.source_language.clone();
+        let tgt_lang = self.target_language.clone();
+        let seq_counter_final = self.sequence_counter.clone();
+        let seq_counter_stream = self.sequence_counter.clone();
+
+        // 3. 建立严格 FIFO 有序队列处理终态句子，杜绝并发乱序
+        let (final_tx, mut final_rx) = mpsc::channel::<TranscriptSegment>(64);
+        let app_final = app.clone();
+        let is_running_final = self.is_running.clone();
 
         tokio::spawn(async move {
-            while is_running_clone.load(Ordering::SeqCst) {
-                match transcript_rx.recv().await {
-                    Ok(mut segment) => {
-                        let app_emit = app.clone();
-                        let trans_svc = translation_svc.clone();
-                        let dec_svc = decision_svc.clone();
-                        let pred_svc = predict_svc.clone();
-                        let ctx = context.clone();
+            while is_running_final.load(Ordering::SeqCst) {
+                let segment_opt = final_rx.recv().await;
+                let mut segment = match segment_opt {
+                    Some(s) => s,
+                    None => break,
+                };
 
-                        if !segment.is_final {
-                            // 临时 Partial 词流快速上屏
-                            let _ = app_emit.emit(
-                                "asr-partial",
-                                OrchestratedEventPayload {
-                                    segment,
-                                    intent: None,
-                                    suggestions: None,
-                                },
-                            );
-                        } else {
-                            // 终态 Final 句：并发启动翻译与推测
-                            tokio::spawn(async move {
-                                let original_text = segment.text.clone();
+                let original_text = segment.text.clone();
 
-                                // 并发任务 1: 机器翻译（优先复用 Soniox 原生流式同传翻译，无额外 LLM 网络耗时）
-                                let translated = if let Some(soniox_trans) = segment.translated_text.take() {
-                                    if !soniox_trans.trim().is_empty() {
-                                        soniox_trans
-                                    } else if !original_text.trim().is_empty() {
-                                        trans_svc
-                                            .translate(&original_text, "en", "zh")
-                                            .await
-                                            .unwrap_or_else(|_| "翻译中...".to_string())
-                                    } else {
-                                        String::new()
-                                    }
-                                } else if !original_text.trim().is_empty() {
-                                    trans_svc
-                                        .translate(&original_text, "en", "zh")
-                                        .await
-                                        .unwrap_or_else(|_| "翻译中...".to_string())
-                                } else {
-                                    String::new()
-                                };
-                                segment.translated_text = Some(translated);
+                // 翻译处理：优先复用 Soniox 原生返回的流式译文，次选配置的翻译服务（带 2 秒超时，防止堵塞）
+                let translated = if let Some(soniox_trans) = segment.translated_text.take() {
+                    if !soniox_trans.trim().is_empty() {
+                        soniox_trans
+                    } else if !original_text.trim().is_empty() {
+                        let trans_fut = translation_svc.translate(&original_text, &src_lang, &tgt_lang);
+                        tokio::time::timeout(tokio::time::Duration::from_millis(2000), trans_fut)
+                            .await
+                            .ok()
+                            .and_then(|res| res.ok())
+                            .unwrap_or_else(|| original_text.clone())
+                    } else {
+                        String::new()
+                    }
+                } else if !original_text.trim().is_empty() {
+                    let trans_fut = translation_svc.translate(&original_text, &src_lang, &tgt_lang);
+                    tokio::time::timeout(tokio::time::Duration::from_millis(2000), trans_fut)
+                        .await
+                        .ok()
+                        .and_then(|res| res.ok())
+                        .unwrap_or_else(|| original_text.clone())
+                } else {
+                    String::new()
+                };
+                segment.translated_text = Some(translated);
 
-                                let mut detected_intent = None;
-                                let mut generated_suggestions = None;
+                // 立即派发 asr-final 终态字幕事件，绝不因后台 LLM 问句判定与策略生成阻塞字幕上屏
+                let segment_id = segment.id.clone();
+                let seq = seq_counter_final.fetch_add(1, Ordering::SeqCst);
+                let _ = app_final.emit(
+                    "asr-final",
+                    OrchestratedEventPayload {
+                        segment,
+                        intent: None,
+                        suggestions: None,
+                        sequence_id: seq,
+                    },
+                );
 
-                                // 并发任务 2: Jev 问句决策拦截
-                                if auto_predict {
-                                    if let Ok(decision) = dec_svc.evaluate(&original_text, &ctx).await {
-                                        detected_intent = Some(decision.intent.display_name().to_string());
-                                        if decision.is_question {
-                                            // 并发任务 3: 生成策略应答
-                                            if let Ok(sugs) = pred_svc.generate_suggestions(&original_text, &ctx).await {
-                                                generated_suggestions = Some(sugs);
-                                            }
-                                        }
+                // 后台非阻塞并发执行 Jev 问句决策与应答策略生成，完成后通过独立事件通知前端
+                if auto_predict && should_evaluate_for_prediction(&original_text) {
+                    let dec_svc = decision_svc.clone();
+                    let pred_svc = predict_svc.clone();
+                    let ctx = context.clone();
+                    let app_sug = app_final.clone();
+                    let orig_for_eval = original_text;
+
+                    tokio::spawn(async move {
+                        let dec_fut = dec_svc.evaluate(&orig_for_eval, &ctx);
+                        if let Ok(Ok(decision)) =
+                            tokio::time::timeout(tokio::time::Duration::from_secs(3), dec_fut).await
+                        {
+                            if decision.is_question {
+                                let intent_str = decision.intent.display_name().to_string();
+                                let pred_fut = pred_svc.generate_suggestions(&orig_for_eval, &ctx);
+                                if let Ok(Ok(sugs)) = tokio::time::timeout(
+                                    tokio::time::Duration::from_secs(5),
+                                    pred_fut,
+                                )
+                                .await
+                                {
+                                    if !sugs.is_empty() {
+                                        let _ = app_sug.emit(
+                                            "asr-suggestions",
+                                            SuggestionsEventPayload {
+                                                segment_id,
+                                                intent: intent_str,
+                                                suggestions: sugs,
+                                            },
+                                        );
                                     }
                                 }
+                            }
+                        }
+                    });
+                }
+            }
+        });
 
-                                // 派发完整丰富的领域事件
-                                let _ = app_emit.emit(
-                                    "asr-final",
-                                    OrchestratedEventPayload {
-                                        segment,
-                                        intent: detected_intent,
-                                        suggestions: generated_suggestions,
-                                    },
-                                );
-                            });
+        // 4. ASR 流监听派发主循环
+        let app_stream = app.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop_notify.notified() => {
+                        break;
+                    }
+                    recv_res = transcript_rx.recv() => {
+                        match recv_res {
+                            Ok(segment) => {
+                                if !is_running_clone.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                                if !segment.is_final {
+                                    let seq = seq_counter_stream.load(Ordering::Relaxed);
+                                    let _ = app_stream.emit(
+                                        "asr-partial",
+                                        OrchestratedEventPayload {
+                                            segment,
+                                            intent: None,
+                                            suggestions: None,
+                                            sequence_id: seq,
+                                        },
+                                    );
+                                } else {
+                                    let _ = final_tx.send(segment).await;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                println!("ℹ️ [LiveHear] ASR 流接收通道已关闭");
+                                break;
+                            }
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
@@ -165,22 +278,18 @@ impl LiveHearOrchestrator {
         Ok(())
     }
 
-    /// 推送 PCM 音频流（前端 Web Audio 优先采集流）
+    /// 推送 PCM 音频流（测试/模拟音频通道）
     pub async fn push_audio(&self, pcm_chunk: Vec<u8>) -> Result<(), LiveHearError> {
-        // 若前端 Web Audio 已激活并推送音频，仅在首次调用时暂停后台 cpal 原生麦克风，避免双重采集
-        if !self.has_stopped_native.swap(true, Ordering::Relaxed) {
-            let mut cap = self.audio_capture.lock().await;
-            cap.stop();
-        }
         let lock = self.audio_tx.lock().await;
         if let Some(tx) = lock.as_ref() {
-            let _ = tx.send(pcm_chunk).await;
+            let _ = tx.try_send(pcm_chunk);
         }
         Ok(())
     }
 
     pub async fn stop(&self) {
         self.is_running.store(false, Ordering::SeqCst);
+        self.stop_notify.notify_waiters();
         {
             let mut cap = self.audio_capture.lock().await;
             cap.stop();

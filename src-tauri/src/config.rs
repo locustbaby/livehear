@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SonioxConfig {
@@ -9,17 +12,38 @@ pub struct SonioxConfig {
     pub model: String,
     pub sample_rate: u32,
     pub enable_speaker_diarization: bool,
+    #[serde(default = "default_enable_endpoint_detection")]
+    pub enable_endpoint_detection: bool,
+    #[serde(default = "default_language_hints")]
     pub language_hints: Vec<String>,
     #[serde(default = "default_enable_translation")]
     pub enable_translation: bool,
     #[serde(default = "default_translation_type")]
-    pub translation_type: String, // "two_way" or "one_way"
+    pub translation_type: String, // "one_way" (涉外会议同传) 或 "two_way" (跨国双向对话)
     #[serde(default = "default_target_language")]
     pub target_language: String, // "zh"
     #[serde(default = "default_language_a")]
     pub language_a: String, // "en"
     #[serde(default = "default_language_b")]
     pub language_b: String, // "zh"
+    #[serde(default = "default_max_endpoint_delay_ms")]
+    pub max_endpoint_delay_ms: u32,
+    #[serde(default = "default_endpoint_sensitivity")]
+    pub endpoint_sensitivity: f32,
+    #[serde(default)]
+    pub custom_terms: Vec<String>,
+    #[serde(default = "default_enable_vad")]
+    pub enable_vad: bool, // 智能静音门禁，降低 60-70% Soniox Token 扣费
+    #[serde(default = "default_vad_threshold")]
+    pub vad_threshold: f32,
+}
+
+fn default_enable_endpoint_detection() -> bool {
+    true
+}
+
+fn default_language_hints() -> Vec<String> {
+    vec!["en".to_string(), "zh".to_string()]
 }
 
 fn default_enable_translation() -> bool {
@@ -27,7 +51,7 @@ fn default_enable_translation() -> bool {
 }
 
 fn default_translation_type() -> String {
-    "two_way".to_string()
+    "one_way".to_string()
 }
 
 fn default_target_language() -> String {
@@ -42,6 +66,22 @@ fn default_language_b() -> String {
     "zh".to_string()
 }
 
+fn default_max_endpoint_delay_ms() -> u32 {
+    2000
+}
+
+fn default_endpoint_sensitivity() -> f32 {
+    -0.2
+}
+
+fn default_enable_vad() -> bool {
+    true
+}
+
+fn default_vad_threshold() -> f32 {
+    1.8
+}
+
 impl Default for SonioxConfig {
     fn default() -> Self {
         Self {
@@ -50,12 +90,18 @@ impl Default for SonioxConfig {
             model: "stt-rt-v5".to_string(),
             sample_rate: 16000,
             enable_speaker_diarization: true,
+            enable_endpoint_detection: true,
             language_hints: vec!["en".to_string(), "zh".to_string()],
             enable_translation: true,
-            translation_type: "two_way".to_string(),
+            translation_type: "one_way".to_string(),
             target_language: "zh".to_string(),
             language_a: "en".to_string(),
             language_b: "zh".to_string(),
+            max_endpoint_delay_ms: 2000,
+            endpoint_sensitivity: -0.2,
+            custom_terms: vec![],
+            enable_vad: true,
+            vad_threshold: 1.8,
         }
     }
 }
@@ -66,6 +112,12 @@ pub struct OpenRouterConfig {
     pub base_url: String,
     pub translate_model: String,
     pub predict_model: String,
+    #[serde(default = "default_enable_polish")]
+    pub enable_polish: bool,
+}
+
+fn default_enable_polish() -> bool {
+    true
 }
 
 impl Default for OpenRouterConfig {
@@ -75,6 +127,7 @@ impl Default for OpenRouterConfig {
             base_url: "https://openrouter.ai/api/v1".to_string(),
             translate_model: "deepseek/deepseek-chat".to_string(),
             predict_model: "anthropic/claude-3.5-haiku".to_string(),
+            enable_polish: true,
         }
     }
 }
@@ -115,50 +168,110 @@ impl Default for MeetingConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageConfig {
+    #[serde(default = "default_auto_save")]
+    pub auto_save: bool,
+    #[serde(default = "default_save_dir")]
+    pub save_dir: String,
+    #[serde(default = "default_file_format")]
+    pub file_format: String,
+}
+
+fn default_auto_save() -> bool {
+    true
+}
+
+fn default_save_dir() -> String {
+    "~/Documents/livehear".to_string()
+}
+
+fn default_file_format() -> String {
+    "txt".to_string()
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            auto_save: true,
+            save_dir: default_save_dir(),
+            file_format: default_file_format(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     pub soniox: SonioxConfig,
     pub openrouter: OpenRouterConfig,
     pub jev: JevConfig,
     pub meeting: MeetingConfig,
+    #[serde(default)]
+    pub storage: StorageConfig,
 }
 
 impl AppConfig {
-    /// 获取配置文件路径：优先读取当前目录或用户配置目录下的 livehear.config.json
-    pub fn config_path() -> PathBuf {
-        let parent_root = PathBuf::from("../livehear.config.json");
-        if parent_root.exists() {
-            return parent_root;
-        }
-
-        let local_path = PathBuf::from("livehear.config.json");
-        if local_path.exists() {
-            return local_path;
-        }
-
-        if let Some(home) = dirs_home() {
-            let user_config = home.join(".config").join("livehear").join("config.json");
-            if user_config.exists() {
-                return user_config;
-            }
-        }
-
-        local_path
+    /// 绑定配置文件的固定落点（应用配置目录）。打包后进程 cwd 为 `/`，不能依赖相对路径。
+    pub fn init_path(dir: PathBuf) {
+        let _ = CONFIG_PATH.set(dir.join("config.json"));
     }
 
-    /// 从文件加载配置，若不存在则创建默认配置
-    pub fn load() -> Self {
-        let path = Self::config_path();
-        if path.exists() {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
-                    return config;
+    pub fn config_path() -> PathBuf {
+        if let Ok(p) = std::env::var("LIVEHEAR_CONFIG") {
+            return PathBuf::from(p);
+        }
+        CONFIG_PATH
+            .get()
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from("livehear.config.json"))
+    }
+
+    /// 仅用于首次启动时从开发期遗留位置导入，之后以应用配置目录为准。
+    fn legacy_candidates() -> Vec<PathBuf> {
+        let mut v = vec![
+            PathBuf::from("../livehear.config.json"),
+            PathBuf::from("livehear.config.json"),
+        ];
+        if let Some(home) = dirs_home() {
+            v.push(home.join(".config").join("livehear").join("config.json"));
+        }
+        v
+    }
+
+    fn read(path: &Path) -> Option<AppConfig> {
+        let content = fs::read_to_string(path).ok()?;
+        match serde_json::from_str::<AppConfig>(&content) {
+            Ok(mut c) => {
+                // 自动迁移旧版过短的 600ms/1000ms/1500ms 断句延迟配置，避免多人会议语句切碎与语义丢失
+                if c.soniox.max_endpoint_delay_ms < 1600 {
+                    c.soniox.max_endpoint_delay_ms = 2000;
                 }
+                if c.soniox.vad_threshold > 2.5 {
+                    c.soniox.vad_threshold = 1.8;
+                }
+                Some(c)
+            }
+            Err(e) => {
+                eprintln!("⚠️ [LiveHear] 配置文件解析失败 {}: {}", path.display(), e);
+                None
             }
         }
-        let default_config = Self::default();
-        let _ = default_config.save_to(&path);
-        default_config
+    }
+
+    pub fn load() -> Self {
+        let path = Self::config_path();
+        if let Some(c) = Self::read(&path) {
+            return c;
+        }
+        let seeded = Self::legacy_candidates()
+            .iter()
+            .filter(|p| p.exists())
+            .find_map(|p| Self::read(p))
+            .unwrap_or_default();
+        if let Err(e) = seeded.save_to(&path) {
+            eprintln!("⚠️ [LiveHear] 无法写入初始配置: {}", e);
+        }
+        seeded
     }
 
     /// 保存配置到指定路径

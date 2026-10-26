@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local config containing API keys
+livehear.config.json
+src-tauri/livehear.config.json

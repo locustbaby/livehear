@@ -13,6 +13,11 @@ export interface TranscriptSegment {
   speaker: Speaker;
   text: string;
   translated_text?: string;
+  confirmed_text?: string;
+  provisional_text?: string;
+  confirmed_translated_text?: string;
+  provisional_translated_text?: string;
+  detected_language?: string;
   is_final: boolean;
   start_ms?: number;
   duration_ms?: number;

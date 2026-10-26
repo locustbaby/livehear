@@ -6,18 +6,24 @@ export interface FullAppConfig {
     model: string;
     sample_rate: number;
     enable_speaker_diarization: boolean;
+    enable_endpoint_detection?: boolean;
     language_hints: string[];
     enable_translation?: boolean;
     translation_type?: string;
     target_language?: string;
     language_a?: string;
     language_b?: string;
+    max_endpoint_delay_ms?: number;
+    custom_terms?: string[];
+    enable_vad?: boolean;
+    vad_threshold?: number;
   };
   openrouter: {
     api_key: string;
     base_url: string;
     translate_model: string;
     predict_model: string;
+    enable_polish?: boolean;
   };
   jev: {
     enabled: boolean;
@@ -29,6 +35,11 @@ export interface FullAppConfig {
   meeting: {
     auto_predict: boolean;
     context: string;
+  };
+  storage?: {
+    auto_save?: boolean;
+    save_dir?: string;
+    file_format?: string;
   };
 }
 

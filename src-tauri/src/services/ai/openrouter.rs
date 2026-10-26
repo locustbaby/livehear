@@ -4,6 +4,24 @@ use crate::services::{PredictService, TranslationService};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+
+static SHARED_HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
+
+pub fn shared_http_client() -> Client {
+    SHARED_HTTP_CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .pool_max_idle_per_host(16)
+                .pool_idle_timeout(std::time::Duration::from_secs(90))
+                .tcp_nodelay(true)
+                .connect_timeout(std::time::Duration::from_secs(2))
+                .timeout(std::time::Duration::from_secs(6))
+                .build()
+                .unwrap_or_else(|_| Client::new())
+        })
+        .clone()
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ChatMessage {
@@ -49,12 +67,90 @@ impl OpenRouterAdapter {
     pub fn new(config: OpenRouterConfig) -> Self {
         Self {
             config,
-            client: Client::builder()
-                .pool_max_idle_per_host(10)
-                .tcp_nodelay(true)
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            client: shared_http_client(),
         }
+    }
+
+    pub async fn polish_and_connect(
+        &self,
+        original_chunk: &str,
+        draft_translation: &str,
+        meeting_context: &str,
+        custom_terms: &[String],
+    ) -> Result<String, LiveHearError> {
+        let api_key = self.config.api_key.trim();
+        if api_key.is_empty() {
+            return Err(LiveHearError::ConfigError("API Key 尚未配置".to_string()));
+        }
+
+        let terms_hint = if custom_terms.is_empty() {
+            String::new()
+        } else {
+            format!("\n【专有术语与译名约束】：{}", custom_terms.join(", "))
+        };
+
+        let ctx_hint = if meeting_context.trim().is_empty() {
+            String::new()
+        } else {
+            format!("\n【当前会议背景】：{}", meeting_context.trim())
+        };
+
+        let system_prompt = "你是一个精通跨国技术会议、架构评审与商务沟通的首席同传译员。\n\
+用户会提供一段实时语音识别的原声段落（可能包含多人会议中的口语停顿、跨分句倒装或同音词偏差）及其流式初步直译。\n\
+请结合完整原声上下文、会议背景与专有术语表，修正由于分句直译导致的语义偏差或词不达意，将其重组润色为一段逻辑严密、自然地道、语义精准的完整中文同传表达。\n\
+严禁输出任何分析、解释或引号包裹，只直接输出最终润色后的中文！";
+
+        let user_content = format!(
+            "{}{}\n【完整原声段落】：{}\n【流式初步直译】：{}",
+            ctx_hint, terms_hint, original_chunk, draft_translation
+        );
+
+        let payload = ChatCompletionRequest {
+            model: self.config.translate_model.clone(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt.to_string(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: user_content,
+                },
+            ],
+            temperature: Some(0.3),
+            max_tokens: Some(512),
+        };
+
+        let url = format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'));
+        let res = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("HTTP-Referer", "https://github.com/livehear/livehear")
+            .header("X-Title", "LiveHear Context Polish")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| LiveHearError::NetworkError(e.to_string()))?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            return Err(LiveHearError::LlmError(format!("LLM 接口错误 ({}): {}", status, body)));
+        }
+
+        let data: ChatCompletionResponse = res
+            .json()
+            .await
+            .map_err(|e| LiveHearError::SerializationError(e.to_string()))?;
+
+        let polished = data
+            .choices
+            .first()
+            .map(|c| c.message.content.trim().to_string())
+            .unwrap_or_else(|| draft_translation.to_string());
+
+        Ok(polished)
     }
 }
 

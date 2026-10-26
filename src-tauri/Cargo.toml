@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "LiveHear: Lightweight Cross-Platform Live Translation & HUD Assistant"
 authors = ["livehear"]
 edition = "2024"
+default-run = "livehear"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

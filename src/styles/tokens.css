@@ -22,14 +22,14 @@
   --font-mono: "SF Mono", Menlo, Monaco, Courier, monospace;
   
   /* Glass Vibrancy Materials (Dark Mode Default) */
-  --bg-window: rgba(28, 28, 32, 0.76);
+  --bg-window: rgba(24, 24, 28, 0.85);
   --bg-window-solid: #1c1c20;
   --bg-card: rgba(255, 255, 255, 0.06);
   --bg-card-hover: rgba(255, 255, 255, 0.10);
   --bg-card-active: rgba(255, 255, 255, 0.14);
   --bg-input: rgba(0, 0, 0, 0.25);
   
-  --backdrop-blur: blur(28px) saturate(180%);
+  --backdrop-blur: blur(16px);
   --border-window: 1px solid rgba(255, 255, 255, 0.14);
   --border-subtle: 1px solid rgba(255, 255, 255, 0.08);
   

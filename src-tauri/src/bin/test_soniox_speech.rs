@@ -9,7 +9,11 @@ use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = "";
+    let api_key = std::env::var("SONIOX_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        eprintln!("请设置 SONIOX_API_KEY 环境变量后运行");
+        return Ok(());
+    }
     let ws_url = "wss://stt-rt.soniox.com/transcribe-websocket";
 
     println!("🔌 正在连接 Soniox WebSocket: {}", ws_url);

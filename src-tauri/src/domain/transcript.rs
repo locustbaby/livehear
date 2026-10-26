@@ -7,6 +7,15 @@ pub struct TranscriptSegment {
     pub speaker: Speaker,
     pub text: String,
     pub translated_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisional_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_translated_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisional_translated_text: Option<String>,
+    pub detected_language: Option<String>,
     pub is_final: bool,
     pub start_ms: Option<u64>,
     pub duration_ms: Option<u64>,
@@ -15,11 +24,24 @@ pub struct TranscriptSegment {
 
 impl TranscriptSegment {
     pub fn new_partial(speaker: Speaker, text: String) -> Self {
+        Self::new_partial_with_id(
+            format!("partial-{}", chrono::Utc::now().timestamp_micros()),
+            speaker,
+            text,
+        )
+    }
+
+    pub fn new_partial_with_id(id: String, speaker: Speaker, text: String) -> Self {
         Self {
-            id: format!("partial-{}", chrono::Utc::now().timestamp_micros()),
+            id,
             speaker,
             text,
             translated_text: None,
+            confirmed_text: None,
+            provisional_text: None,
+            confirmed_translated_text: None,
+            provisional_translated_text: None,
+            detected_language: None,
             is_final: false,
             start_ms: None,
             duration_ms: None,
@@ -33,11 +55,32 @@ impl TranscriptSegment {
         start_ms: Option<u64>,
         duration_ms: Option<u64>,
     ) -> Self {
+        Self::new_final_with_id(
+            format!("final-{}", chrono::Utc::now().timestamp_micros()),
+            speaker,
+            text,
+            start_ms,
+            duration_ms,
+        )
+    }
+
+    pub fn new_final_with_id(
+        id: String,
+        speaker: Speaker,
+        text: String,
+        start_ms: Option<u64>,
+        duration_ms: Option<u64>,
+    ) -> Self {
         Self {
-            id: format!("final-{}", chrono::Utc::now().timestamp_micros()),
+            id,
             speaker,
             text,
             translated_text: None,
+            confirmed_text: None,
+            provisional_text: None,
+            confirmed_translated_text: None,
+            provisional_translated_text: None,
+            detected_language: None,
             is_final: true,
             start_ms,
             duration_ms,

@@ -47,11 +47,7 @@ impl JevAdapter {
         Self {
             config,
             fallback_api_key,
-            client: Client::builder()
-                .pool_max_idle_per_host(5)
-                .tcp_nodelay(true)
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            client: super::openrouter::shared_http_client(),
         }
     }
 }
