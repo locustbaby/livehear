@@ -5,14 +5,16 @@ import {
   renderSuggestionsHtml,
   renderSettingsModalHtml,
   renderQuickLangPopoverHtml,
+  renderQuickSpeakDockHtml,
   renderLookupPopoverHtml,
   formatTopbarLangBadgeText,
+  detectTextLanguage,
   type HudState,
   type SubtitleItem,
   type SubtitleDisplayMode,
   type SelectionLookupData,
 } from './components/hud';
-import type { FullAppConfig } from './types/domain';
+import type { FullAppConfig, QuickSpeakResult } from './types/domain';
 
 // 安全调用 Tauri API
 async function tauriInvoke<T>(cmd: string, args?: Record<string, any>): Promise<T> {
@@ -34,6 +36,8 @@ class SubtitleStreamManager {
   private maxDomNodes = 120;
   private pendingPartial: { item: SubtitleItem; displayMode: SubtitleDisplayMode } | null = null;
   private rafId: number | null = null;
+  public mySpeakerId: number | null = null;
+  public speakTargetLang = 'en';
 
   private getStreamEl(): HTMLElement | null {
     return document.getElementById('subtitlesStream');
@@ -101,7 +105,12 @@ class SubtitleStreamManager {
     if (placeholder) placeholder.remove();
 
     const div = document.createElement('div');
-    div.innerHTML = renderSubtitleTurnHtml(item, displayMode);
+    div.innerHTML = renderSubtitleTurnHtml(
+      item,
+      displayMode,
+      this.mySpeakerId,
+      this.speakTargetLang
+    );
     const newEl = div.firstElementChild as HTMLElement | null;
     if (!newEl) return;
 
@@ -155,7 +164,9 @@ class SubtitleStreamManager {
 
     streamEl.innerHTML = subtitles
       .slice(-this.maxDomNodes)
-      .map((item) => renderSubtitleTurnHtml(item, displayMode))
+      .map((item) =>
+        renderSubtitleTurnHtml(item, displayMode, this.mySpeakerId, this.speakTargetLang)
+      )
       .join('');
     this.scrollToBottom(true);
   }
@@ -195,6 +206,7 @@ class LiveHearApp {
       enable_translation: true,
       translation_type: 'one_way',
       target_language: 'zh',
+      speak_target_language: 'en',
       language_a: 'en',
       language_b: 'zh',
       max_endpoint_delay_ms: 2000,
@@ -237,10 +249,35 @@ class LiveHearApp {
     micVolume: 0,
     hasMicPermission: true,
     isSettingsOpen: false,
+    mySpeakerId: null,
+    quickSpeakCard: null,
   };
 
   private streamManager: SubtitleStreamManager;
   private polishTimer: any = null;
+  private toastTimer: any = null;
+  private toastRemoveTimer: any = null;
+  private maxSubtitlesInMemory = 1000;
+  private translatingTurnIds = new Set<string>();
+  private coalesceMap = new Map<
+    string,
+    { targetId: string; baseOrig: string; baseTrans: string }
+  >();
+
+  private findSubtitleIndexById(id: string): number {
+    const arr = this.hudState.subtitles;
+    for (let i = arr.length - 1; i >= 0; i--) {
+      if (arr[i].id === id) return i;
+    }
+    return -1;
+  }
+
+  private pushSubtitleWithCap(item: SubtitleItem) {
+    this.hudState.subtitles.push(item);
+    if (this.hudState.subtitles.length > this.maxSubtitlesInMemory) {
+      this.hudState.subtitles.splice(0, this.hudState.subtitles.length - this.maxSubtitlesInMemory);
+    }
+  }
 
   constructor() {
     this.streamManager = new SubtitleStreamManager();
@@ -255,7 +292,9 @@ class LiveHearApp {
   }
 
   private detectPlatform() {
-    document.documentElement.setAttribute('data-platform', 'macos');
+    const ua = navigator.userAgent.toLowerCase();
+    const platform = ua.includes('win') ? 'windows' : ua.includes('linux') ? 'linux' : 'macos';
+    document.documentElement.setAttribute('data-platform', platform);
   }
 
   private initialRender() {
@@ -308,7 +347,9 @@ class LiveHearApp {
           jev: { ...this.appConfig.jev, ...cfg.jev },
           meeting: { ...this.appConfig.meeting, ...cfg.meeting },
         };
+        this.streamManager.speakTargetLang = this.appConfig.soniox.speak_target_language || 'en';
         this.refreshTopbarBadges();
+        this.refreshQuickSpeakDock();
       }
     } catch (e) {
       console.warn('读取配置失败:', e);
@@ -378,7 +419,7 @@ class LiveHearApp {
         });
 
         const parseSpeakerName = (spk: any): string => {
-          if (!spk) return '说话人 1';
+          if (!spk) return 'Speaker 1';
           if (typeof spk === 'string') return spk;
           if (spk.display_name) return String(spk.display_name);
           if (spk.role) {
@@ -386,7 +427,18 @@ class LiveHearApp {
             if (spk.role.RemoteParticipant) return `Speaker ${spk.role.RemoteParticipant}`;
             if (spk.role.LocalUser !== undefined) return '我 (Microphone)';
           }
-          return '说话人 1';
+          return 'Speaker 1';
+        };
+
+        const parseSpeakerId = (spk: any, speakerName: string): number | undefined => {
+          if (spk && typeof spk === 'object') {
+            if (typeof spk.id === 'number' && spk.id > 0) return spk.id;
+            if (spk.role && typeof spk.role === 'object' && typeof spk.role.RemoteParticipant === 'number') {
+              return spk.role.RemoteParticipant;
+            }
+          }
+          const m = String(speakerName || '').match(/(\d+)/);
+          return m ? parseInt(m[1], 10) : undefined;
         };
 
         const stripControl = (s?: string): string =>
@@ -416,18 +468,12 @@ class LiveHearApp {
           return words >= 36 || trimmed.length >= 190;
         };
 
-        // 记录当前流式 Turn 合并到哪一张同发言人既有卡片：{ targetId, baseOrig, baseTrans }
-        const coalesceMap = new Map<
-          string,
-          { targetId: string; baseOrig: string; baseTrans: string }
-        >();
-
         const resolveCoalesceBinding = (
           turnId: string,
           speaker: string,
           nowMs: number
         ): { targetId: string; baseOrig: string; baseTrans: string } | null => {
-          const existing = coalesceMap.get(turnId);
+          const existing = this.coalesceMap.get(turnId);
           if (existing) return existing;
 
           const lastIdx = this.hudState.subtitles.length - 1;
@@ -449,7 +495,11 @@ class LiveHearApp {
               baseOrig: last.original,
               baseTrans: last.translated,
             };
-            coalesceMap.set(turnId, binding);
+            if (this.coalesceMap.size >= 64) {
+              const oldestKey = this.coalesceMap.keys().next().value;
+              if (oldestKey) this.coalesceMap.delete(oldestKey);
+            }
+            this.coalesceMap.set(turnId, binding);
             return binding;
           }
           return null;
@@ -474,6 +524,7 @@ class LiveHearApp {
           if (!segment) return;
 
           const speaker = parseSpeakerName(segment.speaker);
+          const speakerId = parseSpeakerId(segment.speaker, speaker);
           const original = stripControl(segment.text).trim();
           const translated = stripControl(segment.translated_text).trim();
           const detectedLanguage = segment.detected_language;
@@ -485,7 +536,7 @@ class LiveHearApp {
           const binding = resolveCoalesceBinding(rawTurnId, speaker, nowMs);
 
           if (binding) {
-            const targetIdx = this.hudState.subtitles.findIndex((s) => s.id === binding.targetId);
+            const targetIdx = this.findSubtitleIndexById(binding.targetId);
             if (targetIdx >= 0) {
               const target = this.hudState.subtitles[targetIdx];
               const segConfOrig = segment.confirmed_text ? stripControl(segment.confirmed_text) : '';
@@ -517,12 +568,13 @@ class LiveHearApp {
             }
           }
 
-          const existingIdx = this.hudState.subtitles.findIndex((s) => s.id === rawTurnId);
+          const existingIdx = this.findSubtitleIndexById(rawTurnId);
           const existingItem = existingIdx >= 0 ? this.hudState.subtitles[existingIdx] : null;
 
           const item: SubtitleItem = {
             id: rawTurnId,
             speaker,
+            speakerId,
             isTrackRemote: true,
             original: original || '...',
             translated: translated || '正在同传中...',
@@ -548,7 +600,7 @@ class LiveHearApp {
             if (lastIdx >= 0 && this.hudState.subtitles[lastIdx].isPartial) {
               this.hudState.subtitles[lastIdx] = item;
             } else {
-              this.hudState.subtitles.push(item);
+              this.pushSubtitleWithCap(item);
             }
           }
 
@@ -562,6 +614,7 @@ class LiveHearApp {
           if (!segment) return;
 
           const speaker = parseSpeakerName(segment.speaker);
+          const speakerId = parseSpeakerId(segment.speaker, speaker);
           const original = stripControl(segment.text).trim();
           const translated = stripControl(segment.translated_text).trim();
           const detectedLanguage = segment.detected_language;
@@ -574,10 +627,10 @@ class LiveHearApp {
           const nowMs = Date.now();
           const rawTurnId = segment.id || `final-${nowMs}`;
           const binding = resolveCoalesceBinding(rawTurnId, speaker, nowMs);
-          coalesceMap.delete(rawTurnId);
+          this.coalesceMap.delete(rawTurnId);
 
           if (binding) {
-            const targetIdx = this.hudState.subtitles.findIndex((s) => s.id === binding.targetId);
+            const targetIdx = this.findSubtitleIndexById(binding.targetId);
             if (targetIdx >= 0) {
               const target = this.hudState.subtitles[targetIdx];
               target.original = joinText(binding.baseOrig, original);
@@ -605,13 +658,14 @@ class LiveHearApp {
             }
           }
 
-          const existingIdx = this.hudState.subtitles.findIndex((s) => s.id === rawTurnId);
+          const existingIdx = this.findSubtitleIndexById(rawTurnId);
           const existingTime =
             existingIdx >= 0 ? this.hudState.subtitles[existingIdx].timestamp : new Date().toLocaleTimeString();
 
           const item: SubtitleItem = {
             id: rawTurnId,
             speaker,
+            speakerId,
             isTrackRemote: true,
             original,
             translated: translated || original,
@@ -632,7 +686,7 @@ class LiveHearApp {
             if (lastIdx >= 0 && this.hudState.subtitles[lastIdx].isPartial) {
               this.hudState.subtitles[lastIdx] = item;
             } else {
-              this.hudState.subtitles.push(item);
+              this.pushSubtitleWithCap(item);
             }
           }
 
@@ -644,18 +698,22 @@ class LiveHearApp {
           }
         };
 
-        // 7. 后台非阻塞智能应答建议事件监听
+        // 7. 后台非阻塞智能应答建议事件监听（若该句是「我自己」说的，则忽略抢答弹窗）
         await listen('asr-suggestions', (event: any) => {
           const payload = event.payload;
+          if (payload?.segment_id && this.hudState.mySpeakerId) {
+            const matchedIdx = this.findSubtitleIndexById(payload.segment_id);
+            if (matchedIdx >= 0 && this.hudState.subtitles[matchedIdx].speakerId === this.hudState.mySpeakerId) {
+              return;
+            }
+          }
           if (payload?.suggestions && payload.suggestions.length > 0) {
             this.renderSuggestionDrawer(payload.suggestions, payload.intent);
           }
         });
 
         await listen('asr-partial', handlePartial);
-        await listen('soniox-partial', handlePartial);
         await listen('asr-final', handleFinal);
-        await listen('soniox-final', handleFinal);
         console.log('✅ Tauri 实时同传双向通道已激活');
       } catch (e) {
         console.warn('初始化 Tauri 事件监听失败:', e);
@@ -856,12 +914,20 @@ class LiveHearApp {
     document.getElementById('btnOpenCopilot')?.classList.add('active');
   }
 
+  private formatSpeakerRoleForHistory(s: SubtitleItem): string {
+    const isMe =
+      !s.isTrackRemote ||
+      (Boolean(this.hudState.mySpeakerId) && s.speakerId === this.hudState.mySpeakerId);
+    return isMe ? `我 (${s.speaker})` : `对方 (${s.speaker})`;
+  }
+
   private async requestCopilotPrompts(customIntent?: string, focusTurnId?: string) {
+    const speakUpper = (this.appConfig.soniox.speak_target_language || 'en').toUpperCase();
     const label = customIntent
-      ? `自定义意图: ${customIntent.slice(0, 12)}`
+      ? `${speakUpper} 提词 · ${customIntent.slice(0, 14)}`
       : focusTurnId
-      ? '针对单句回应'
-      : '结合上文提词';
+      ? `${speakUpper} 针对单句回应`
+      : `${speakUpper} 结合上文提词`;
 
     this.renderSuggestionDrawer(this.hudState.suggestions, label, true, customIntent || '');
 
@@ -881,10 +947,11 @@ class LiveHearApp {
       .map((s) => {
         const o = (s.original || '').trim();
         const t = (s.translated || '').trim();
-        const mark = focusTurnId && s.id === focusTurnId ? '【对方刚说·需回应】' : '';
+        const roleLabel = this.formatSpeakerRoleForHistory(s);
+        const mark = focusTurnId && s.id === focusTurnId ? '【对方刚说·需重点回应】' : '';
         return t && t !== o
-          ? `${mark}[${s.speaker}] 原声: ${o} | 译文: ${t}`
-          : `${mark}[${s.speaker}]: ${o}`;
+          ? `${mark}[${roleLabel}] 原声: ${o} | 译文: ${t}`
+          : `${mark}[${roleLabel}]: ${o}`;
       })
       .join('\n');
 
@@ -892,6 +959,7 @@ class LiveHearApp {
       const suggestions = await tauriInvoke<any[]>('generate_copilot_prompts', {
         recentHistory,
         userIntent: customIntent && customIntent.trim() ? customIntent.trim() : null,
+        targetLang: this.appConfig.soniox.speak_target_language || 'en',
       });
       this.renderSuggestionDrawer(suggestions, label, false, customIntent || '');
     } catch (err: any) {
@@ -905,14 +973,104 @@ class LiveHearApp {
     }
   }
 
+  private async translateTurnToForeign(turnId: string, silent = false) {
+    if (this.translatingTurnIds.has(turnId)) return;
+    const curIdx = this.findSubtitleIndexById(turnId);
+    if (curIdx < 0) return;
+    const curItem = this.hudState.subtitles[curIdx];
+    const speakLang = this.appConfig.soniox.speak_target_language || 'en';
+    const speakUpper = speakLang.toUpperCase();
+
+    if (!this.appConfig.openrouter?.api_key?.trim()) {
+      if (!silent) {
+        this.showToast('⚠️ 请先在设置中配置 AI 智囊 API Key');
+      }
+      return;
+    }
+
+    this.translatingTurnIds.add(turnId);
+    if (!silent) {
+      this.showToast(`🗣️ 正在将这句中文转化为地道 ${speakUpper} 口语...`);
+    }
+
+    const prevTurns =
+      curIdx > 0
+        ? this.hudState.subtitles
+            .slice(Math.max(0, curIdx - 4), curIdx)
+            .filter((s) => !s.isPartial && (s.original || s.translated))
+            .map((s) => {
+              const o = (s.original || '').trim();
+              const t = (s.translated || '').trim();
+              const roleLabel = this.formatSpeakerRoleForHistory(s);
+              return t && t !== o ? `[${roleLabel}] 原声: ${o} | 译文: ${t}` : `[${roleLabel}]: ${o}`;
+            })
+            .join('\n')
+        : '';
+
+    try {
+      const res = await tauriInvoke<{
+        original?: string;
+        translated?: string;
+        tone_tag?: string | null;
+      }>('polish_transcript', {
+        original: curItem.original,
+        draft: curItem.translated,
+        recentHistory: prevTurns,
+        lowConfidenceWords: curItem.lowConfidenceWords || [],
+        targetLang: speakLang,
+      });
+
+      const targetIdx = this.findSubtitleIndexById(turnId);
+      const target = targetIdx >= 0 ? this.hudState.subtitles[targetIdx] : null;
+      if (!target || !res) return;
+
+      if (res.original && res.original.trim()) {
+        target.original = res.original.trim();
+        target.confirmedOriginal = target.original;
+      }
+      if (res.translated && res.translated.trim()) {
+        target.translated = res.translated.trim();
+        target.confirmedTranslated = target.translated;
+      }
+      target.toneTag = (res.tone_tag && res.tone_tag.trim()) || `🗣️ ${speakUpper}口语`;
+      target.isPolished = true;
+      this.streamManager.updateLastFinalTurn(target, this.hudState.displayMode);
+
+      if (!silent && target.translated) {
+        navigator.clipboard.writeText(target.translated);
+        this.showToast(`✅ 已译为 ${speakUpper} 并复制到剪贴板！`);
+      }
+    } catch (err: any) {
+      if (!silent) {
+        this.showToast(`⚠️ 翻译失败: ${err?.message || err}`);
+      }
+    } finally {
+      this.translatingTurnIds.delete(turnId);
+    }
+  }
+
   private scheduleTurnPolish(item: SubtitleItem) {
-    if (this.appConfig.openrouter?.enable_polish === false) return;
     if (!item.original || !item.translated || item.isPartial) return;
     if (!this.appConfig.openrouter?.api_key?.trim()) return;
 
     const origTrimmed = item.original.trim();
     const wordCount = origTrimmed.split(/\s+/).filter(Boolean).length;
     const cjkCount = (origTrimmed.match(/[\u4e00-\u9fff]/g) || []).length;
+    const isMe =
+      !item.isTrackRemote ||
+      (Boolean(this.hudState.mySpeakerId) && item.speakerId === this.hudState.mySpeakerId);
+    const isChinese =
+      (item.detectedLanguage === 'zh' || detectTextLanguage(origTrimmed) === 'zh') &&
+      cjkCount >= 2;
+
+    // 当「我自己」说中文时，无论是否开启普通润色，都立即将其翻译为我方目标外语 (如英语) 供开口照念
+    if (isMe && isChinese) {
+      this.translateTurnToForeign(item.id, true);
+      return;
+    }
+
+    if (this.appConfig.openrouter?.enable_polish === false) return;
+
     const hasLowConf = Boolean(item.lowConfidenceWords && item.lowConfidenceWords.length > 0);
     // 若包含声学低置信度词，则放宽长度门限（外语 >= 2 词或中文 >= 4 字即触发纠偏）；否则常规门限（>= 4 词或 >= 8 字）
     if (hasLowConf) {
@@ -928,8 +1086,9 @@ class LiveHearApp {
 
     const targetTurnId = item.id;
     this.polishTimer = setTimeout(async () => {
+      if (this.translatingTurnIds.has(targetTurnId)) return;
       try {
-        const curIdx = this.hudState.subtitles.findIndex((s) => s.id === targetTurnId);
+        const curIdx = this.findSubtitleIndexById(targetTurnId);
         const curItem = curIdx >= 0 ? this.hudState.subtitles[curIdx] : item;
         const prevTurns =
           curIdx > 0
@@ -939,7 +1098,8 @@ class LiveHearApp {
                 .map((s) => {
                   const o = (s.original || '').trim();
                   const t = (s.translated || '').trim();
-                  return t && t !== o ? `[${s.speaker}] 原声: ${o} | 译文: ${t}` : `[${s.speaker}]: ${o}`;
+                  const roleLabel = this.formatSpeakerRoleForHistory(s);
+                  return t && t !== o ? `[${roleLabel}] 原声: ${o} | 译文: ${t}` : `[${roleLabel}]: ${o}`;
                 })
                 .join('\n')
             : '';
@@ -953,8 +1113,16 @@ class LiveHearApp {
           lowConfidenceWords: curItem.lowConfidenceWords || [],
         });
 
-        const cur = this.hudState.subtitles.find((s) => s.id === targetTurnId);
+        if (this.translatingTurnIds.has(targetTurnId)) return;
+        const afterIdx = this.findSubtitleIndexById(targetTurnId);
+        const cur = afterIdx >= 0 ? this.hudState.subtitles[afterIdx] : null;
         if (!cur) return;
+
+        // 若在等待期间用户已将该句手动译为外语或标记为「我」，则不覆盖其外语译文
+        const curIsMe =
+          !cur.isTrackRemote ||
+          (Boolean(this.hudState.mySpeakerId) && cur.speakerId === this.hudState.mySpeakerId);
+        if (curIsMe && isChinese) return;
 
         let nextOrig = cur.original;
         let nextTrans = cur.translated;
@@ -1118,6 +1286,190 @@ class LiveHearApp {
         }
         break;
 
+      case 'quickSetSpeakTargetLang':
+        if (typeof payload === 'string') {
+          const hintsBox = document.getElementById('quickHintsInput') as HTMLInputElement | null;
+          if (hintsBox) {
+            this.appConfig.soniox.language_hints = hintsBox.value
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean);
+          }
+          const strictBox = document.getElementById('quickStrictCheckbox') as HTMLInputElement | null;
+          if (strictBox) {
+            this.appConfig.soniox.language_hints_strict = strictBox.checked;
+          }
+          this.appConfig.soniox.speak_target_language = payload;
+          this.streamManager.speakTargetLang = payload;
+          const qlEl = document.getElementById('quickLangPopoverContainer');
+          if (qlEl) qlEl.innerHTML = renderQuickLangPopoverHtml(this.appConfig);
+          this.refreshTopbarBadges();
+          this.refreshQuickSpeakDock();
+        }
+        break;
+
+      case 'cycleSpeakTargetLang': {
+        const order = ['en', 'ja', 'th', 'ko', 'fr', 'de', 'es'];
+        const cur = this.appConfig.soniox.speak_target_language || 'en';
+        const next = order[(order.indexOf(cur) + 1) % order.length];
+        this.appConfig.soniox.speak_target_language = next;
+        this.streamManager.speakTargetLang = next;
+        this.refreshTopbarBadges();
+        this.refreshQuickSpeakDock();
+        this.streamManager.refreshDisplayMode(this.hudState.subtitles, this.hudState.displayMode);
+        try {
+          await tauriInvoke('save_config', { newConfig: this.appConfig });
+        } catch {}
+        this.showToast(`🗣️ 我方发言/秒译目标外语已切换为: ${next.toUpperCase()}`);
+        break;
+      }
+
+      case 'toggleMySpeaker': {
+        const spkNum = typeof payload === 'number' ? payload : parseInt(String(payload), 10);
+        if (!spkNum || isNaN(spkNum)) break;
+
+        if (this.hudState.mySpeakerId === spkNum) {
+          this.hudState.mySpeakerId = null;
+          this.streamManager.mySpeakerId = null;
+          this.showToast(`已取消「Speaker ${spkNum} = 我」的绑定`);
+        } else {
+          this.hudState.mySpeakerId = spkNum;
+          this.streamManager.mySpeakerId = spkNum;
+          const speakUpper = (this.appConfig.soniox.speak_target_language || 'en').toUpperCase();
+          this.showToast(
+            `🎙️ 已将 Speaker ${spkNum} 设为「我自己」！你说中文时将自动译为 ${speakUpper} 口语`
+          );
+
+          // 立即将该 Speaker 最近说的尚未翻成外语的中文句子翻译成目标外语
+          const myZhTurns = this.hudState.subtitles
+            .filter(
+              (s) =>
+                s.speakerId === spkNum &&
+                !s.isPartial &&
+                (s.detectedLanguage === 'zh' || detectTextLanguage(s.original) === 'zh') &&
+                (!s.translated || s.translated === s.original || detectTextLanguage(s.translated) === 'zh')
+            )
+            .slice(-2);
+          for (const t of myZhTurns) {
+            this.translateTurnToForeign(t.id, true);
+          }
+        }
+        this.refreshTopbarBadges();
+        this.streamManager.refreshDisplayMode(this.hudState.subtitles, this.hudState.displayMode);
+        break;
+      }
+
+      case 'translateTurnToForeign':
+        if (typeof payload === 'string' && payload.trim()) {
+          await this.translateTurnToForeign(payload.trim(), false);
+        }
+        break;
+
+      case 'promptReplyWithIntent':
+        if (typeof payload === 'string') {
+          const customIntent = typeof extra === 'string' ? extra : undefined;
+          await this.requestCopilotPrompts(customIntent, payload);
+        }
+        break;
+
+      case 'submitQuickSpeakTranslate': {
+        const inputEl = document.getElementById('quickSpeakInput') as HTMLInputElement | null;
+        const text = inputEl ? inputEl.value.trim() : '';
+        if (!text) {
+          this.showToast('💡 请先在底部输入框输入你想说的中文或草稿');
+          inputEl?.focus();
+          return;
+        }
+        const speakLang = this.appConfig.soniox.speak_target_language || 'en';
+        this.hudState.quickSpeakCard = {
+          input: text,
+          spoken: '',
+          targetLang: speakLang,
+          loading: true,
+        };
+        this.refreshQuickSpeakDock(text);
+
+        const recentHistory = this.hudState.subtitles
+          .filter((s) => s.original || s.translated)
+          .slice(-4)
+          .map((s) => {
+            const o = (s.original || '').trim();
+            const t = (s.translated || '').trim();
+            const roleLabel = this.formatSpeakerRoleForHistory(s);
+            return t && t !== o ? `[${roleLabel}] 原声: ${o} | 译文: ${t}` : `[${roleLabel}]: ${o}`;
+          })
+          .join('\n');
+
+        try {
+          const res = await tauriInvoke<QuickSpeakResult>('quick_speak_translate', {
+            text,
+            targetLang: speakLang,
+            recentHistory,
+          });
+          this.hudState.quickSpeakCard = {
+            input: text,
+            spoken: res.spoken,
+            alt: res.alt,
+            tip: res.tip,
+            targetLang: res.target_lang || speakLang,
+            loading: false,
+          };
+          this.refreshQuickSpeakDock('');
+          if (res.spoken) {
+            navigator.clipboard.writeText(res.spoken);
+            this.showToast(`✅ 已秒译为 ${(res.target_lang || speakLang).toUpperCase()} 并自动复制到剪贴板！`);
+          }
+        } catch (err: any) {
+          this.hudState.quickSpeakCard = null;
+          this.refreshQuickSpeakDock(text);
+          this.showToast(`⚠️ 口语秒译失败: ${err?.message || err}`);
+        }
+        break;
+      }
+
+      case 'submitQuickSpeakSuggestions': {
+        const inputEl = document.getElementById('quickSpeakInput') as HTMLInputElement | null;
+        const val = inputEl ? inputEl.value.trim() : '';
+        if (inputEl && val) inputEl.value = '';
+        await this.requestCopilotPrompts(val || undefined);
+        break;
+      }
+
+      case 'insertQuickNoteFromDock': {
+        const inputEl = document.getElementById('quickSpeakInput') as HTMLInputElement | null;
+        const noteText = inputEl ? inputEl.value.trim() : '';
+        if (!noteText) {
+          this.showToast('💡 请先在底部输入框填写要记录的笔记内容');
+          inputEl?.focus();
+          return;
+        }
+        const nowMs = Date.now();
+        const noteItem: SubtitleItem = {
+          id: `note-${nowMs}`,
+          speaker: '📝 会议备忘',
+          isTrackRemote: false,
+          original: noteText,
+          translated: noteText,
+          confirmedOriginal: noteText,
+          confirmedTranslated: noteText,
+          detectedLanguage: 'zh',
+          timestamp: new Date().toLocaleTimeString(),
+          isPartial: false,
+          toneTag: '📌 重点笔记',
+          lastUpdatedMs: nowMs,
+        };
+        this.hudState.subtitles.push(noteItem);
+        this.streamManager.finalizeLastCard(noteItem, this.hudState.displayMode);
+        if (inputEl) inputEl.value = '';
+        this.showToast('📌 已将笔记插入会议时间轴');
+        break;
+      }
+
+      case 'closeQuickSpeakCard':
+        this.hudState.quickSpeakCard = null;
+        this.refreshQuickSpeakDock();
+        break;
+
       case 'applyQuickLangConfig': {
         const hintsBox = document.getElementById('quickHintsInput') as HTMLInputElement | null;
         if (hintsBox) {
@@ -1136,7 +1488,9 @@ class LiveHearApp {
 
         try {
           await tauriInvoke('save_config', { newConfig: this.appConfig });
-          this.refreshTopbarBadges();
+          this.streamManager.speakTargetLang = this.appConfig.soniox.speak_target_language || 'en';
+        this.refreshTopbarBadges();
+        this.refreshQuickSpeakDock();
           if (this.hudState.isStreaming) {
             await this.stopLiveStream(false);
             await this.startLiveStream();
@@ -1309,6 +1663,8 @@ class LiveHearApp {
         this.hudState.subtitles = [];
         this.hudState.suggestions = [];
         this.hudState.hasPredictSuggestion = false;
+        this.coalesceMap.clear();
+        this.translatingTurnIds.clear();
         this.streamManager.clear(this.hudState.isStreaming, this.hudState.hasMicPermission);
         const pred = document.getElementById('predictDrawerContainer');
         if (pred) pred.innerHTML = '';
@@ -1394,6 +1750,12 @@ class LiveHearApp {
         const targetLang = document.getElementById('cfgSonioxTargetLang') as HTMLSelectElement;
         if (targetLang) this.appConfig.soniox.target_language = targetLang.value;
 
+        const speakTargetLang = document.getElementById('cfgSonioxSpeakTargetLang') as HTMLSelectElement;
+        if (speakTargetLang) {
+          this.appConfig.soniox.speak_target_language = speakTargetLang.value;
+          this.streamManager.speakTargetLang = speakTargetLang.value;
+        }
+
         const hintsInput = document.getElementById('cfgLanguageHints') as HTMLInputElement;
         if (hintsInput) {
           this.appConfig.soniox.language_hints = hintsInput.value
@@ -1439,6 +1801,16 @@ class LiveHearApp {
             .filter(Boolean);
         }
 
+        const meetingContextInput = document.getElementById('cfgMeetingContext') as HTMLInputElement;
+        if (meetingContextInput) {
+          this.appConfig.meeting.context = meetingContextInput.value.trim();
+        }
+
+        const autoPredictCb = document.getElementById('cfgAutoPredict') as HTMLInputElement;
+        if (autoPredictCb) {
+          this.appConfig.meeting.auto_predict = autoPredictCb.checked;
+        }
+
         const openrouterKey = document.getElementById('cfgOpenRouterApiKey') as HTMLInputElement;
         if (openrouterKey) {
           const val = openrouterKey.value.trim();
@@ -1482,7 +1854,9 @@ class LiveHearApp {
 
         try {
           await tauriInvoke('save_config', { newConfig: this.appConfig });
-          this.refreshTopbarBadges();
+          this.streamManager.speakTargetLang = this.appConfig.soniox.speak_target_language || 'en';
+        this.refreshTopbarBadges();
+        this.refreshQuickSpeakDock();
           this.handleAction('toggleSettings');
 
           if (this.hudState.isStreaming) {
@@ -1506,12 +1880,39 @@ class LiveHearApp {
       langBadge.setAttribute(
         'title',
         isOneWay
-          ? '点击快速切换收听语种范围 (Language Hints) 与目标翻译语言'
+          ? '点击快速切换收听语种范围、听会同传语言与我方 Speak 目标外语'
           : '双向对谈：点击快速切换收听语种与翻译模式'
       );
       langBadge.innerHTML = `<span class="globe-icon">🌐</span><span id="topbarLangBadgeText">${escapeHtml(
         formatTopbarLangBadgeText(this.appConfig)
       )}</span>`;
+    }
+    const mySpkSlot = document.getElementById('topbarMySpeakerSlot');
+    if (mySpkSlot) {
+      mySpkSlot.innerHTML = this.hudState.mySpeakerId
+        ? `
+          <button class="my-speaker-top-pill no-drag"
+                  title="已将 Speaker ${this.hudState.mySpeakerId} 绑定为「我自己」(我说中文将自动译为外语)。点击可取消绑定"
+                  onclick="window.__livehear_action('toggleMySpeaker', ${this.hudState.mySpeakerId})">
+            <span>🎙️ 我: Speaker ${this.hudState.mySpeakerId}</span>
+            <span class="ms-clear">✕</span>
+          </button>
+        `
+        : '';
+    }
+  }
+
+  private refreshQuickSpeakDock(preserveInput?: string) {
+    const dockEl = document.getElementById('quickSpeakDockContainer');
+    if (!dockEl) return;
+    const prevInput =
+      preserveInput !== undefined
+        ? preserveInput
+        : (document.getElementById('quickSpeakInput') as HTMLInputElement | null)?.value || '';
+    dockEl.innerHTML = renderQuickSpeakDockHtml(this.hudState, this.appConfig);
+    const nextInputEl = document.getElementById('quickSpeakInput') as HTMLInputElement | null;
+    if (nextInputEl && prevInput) {
+      nextInputEl.value = prevInput;
     }
   }
 
@@ -1520,6 +1921,7 @@ class LiveHearApp {
       return '';
     }
     const rawLines = this.hudState.subtitles
+      .slice(-120)
       .map((s) => {
         const o = (s.original || '').trim();
         const t = (s.translated || '').trim();
@@ -1743,6 +2145,7 @@ class LiveHearApp {
       await tauriInvoke('stop_soniox_live');
     } catch {}
     this.hudState.isStreaming = false;
+    this.coalesceMap.clear();
     this.updateMicVolume(0);
 
     const liveBtn = document.getElementById('btnToggleLive');
@@ -1764,6 +2167,14 @@ class LiveHearApp {
   }
 
   private showToast(msg: string, actionHtml?: string) {
+    if (this.toastTimer) {
+      clearTimeout(this.toastTimer);
+      this.toastTimer = null;
+    }
+    if (this.toastRemoveTimer) {
+      clearTimeout(this.toastRemoveTimer);
+      this.toastRemoveTimer = null;
+    }
     const existing = document.querySelector('.livehear-toast');
     if (existing) existing.remove();
 
@@ -1777,9 +2188,9 @@ class LiveHearApp {
     document.body.appendChild(toast);
 
     const duration = actionHtml ? 4500 : 2800;
-    setTimeout(() => {
+    this.toastTimer = setTimeout(() => {
       toast.classList.add('hide');
-      setTimeout(() => toast.remove(), 250);
+      this.toastRemoveTimer = setTimeout(() => toast.remove(), 250);
     }, duration);
   }
 }
@@ -1796,7 +2207,14 @@ function escapeHtml(str: string): string {
 
 function escapeJs(str: string): string {
   if (!str) return '';
-  return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, ' ');
+  return str
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 // 初始化应用

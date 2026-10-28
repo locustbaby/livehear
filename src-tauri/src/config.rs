@@ -24,6 +24,8 @@ pub struct SonioxConfig {
     pub translation_type: String, // "one_way" (涉外会议同传) 或 "two_way" (跨国双向对话)
     #[serde(default = "default_target_language")]
     pub target_language: String, // "zh"
+    #[serde(default = "default_speak_target_language")]
+    pub speak_target_language: String, // "en"
     #[serde(default = "default_language_a")]
     pub language_a: String, // "en"
     #[serde(default = "default_language_b")]
@@ -66,6 +68,10 @@ fn default_target_language() -> String {
     "zh".to_string()
 }
 
+fn default_speak_target_language() -> String {
+    "en".to_string()
+}
+
 fn default_language_a() -> String {
     "en".to_string()
 }
@@ -104,6 +110,7 @@ impl Default for SonioxConfig {
             enable_translation: true,
             translation_type: "one_way".to_string(),
             target_language: "zh".to_string(),
+            speak_target_language: "en".to_string(),
             language_a: "en".to_string(),
             language_b: "zh".to_string(),
             max_endpoint_delay_ms: 2000,

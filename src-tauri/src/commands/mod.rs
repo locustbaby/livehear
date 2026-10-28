@@ -275,6 +275,7 @@ pub async fn polish_transcript(
     draft: String,
     recent_history: Option<String>,
     low_confidence_words: Option<Vec<String>>,
+    target_lang: Option<String>,
     container: State<'_, Arc<AppContainer>>,
 ) -> Result<crate::services::ai::openrouter::PolishResult, String> {
     let conf = {
@@ -282,7 +283,14 @@ pub async fn polish_transcript(
         guard.clone()
     };
 
-    if !conf.openrouter.enable_polish {
+    let is_speak_foreign = target_lang
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| !s.eq_ignore_ascii_case("zh"))
+        .unwrap_or(false);
+
+    if !conf.openrouter.enable_polish && !is_speak_foreign {
         return Ok(crate::services::ai::openrouter::PolishResult {
             original,
             translated: draft,
@@ -299,6 +307,7 @@ pub async fn polish_transcript(
             &low_confidence_words.unwrap_or_default(),
             &conf.meeting.context,
             &conf.soniox.custom_terms,
+            target_lang.as_deref(),
         )
         .await
         .map_err(|e| e.to_string())
@@ -329,15 +338,60 @@ pub async fn lookup_selection(
 pub async fn generate_copilot_prompts(
     recent_history: String,
     user_intent: Option<String>,
+    target_lang: Option<String>,
     container: State<'_, Arc<AppContainer>>,
 ) -> Result<Vec<ReplySuggestion>, String> {
-    let (openrouter_cfg, meeting_ctx) = {
+    let (openrouter_cfg, meeting_ctx, default_speak_lang) = {
         let guard = container.config.read().await;
-        (guard.openrouter.clone(), guard.meeting.context.clone())
+        (
+            guard.openrouter.clone(),
+            guard.meeting.context.clone(),
+            guard.soniox.speak_target_language.clone(),
+        )
     };
+    let eff_lang = target_lang
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(default_speak_lang);
     let adapter = crate::services::ai::OpenRouterAdapter::new(openrouter_cfg);
     adapter
-        .generate_copilot_prompts(&recent_history, user_intent.as_deref(), &meeting_ctx)
+        .generate_copilot_prompts(
+            &recent_history,
+            user_intent.as_deref(),
+            &meeting_ctx,
+            Some(&eff_lang),
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn quick_speak_translate(
+    text: String,
+    target_lang: Option<String>,
+    recent_history: Option<String>,
+    container: State<'_, Arc<AppContainer>>,
+) -> Result<crate::services::ai::openrouter::QuickSpeakResult, String> {
+    let (openrouter_cfg, meeting_ctx, custom_terms, default_speak_lang) = {
+        let guard = container.config.read().await;
+        (
+            guard.openrouter.clone(),
+            guard.meeting.context.clone(),
+            guard.soniox.custom_terms.clone(),
+            guard.soniox.speak_target_language.clone(),
+        )
+    };
+    let eff_lang = target_lang
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(default_speak_lang);
+    let adapter = crate::services::ai::OpenRouterAdapter::new(openrouter_cfg);
+    adapter
+        .quick_speak_translate(
+            &text,
+            &eff_lang,
+            recent_history.as_deref().unwrap_or(""),
+            &meeting_ctx,
+            &custom_terms,
+        )
         .await
         .map_err(|e| e.to_string())
 }

@@ -124,6 +124,10 @@ button, input, select, textarea, .no-drag {
   gap: 10px;
   padding-left: 72px; /* 完美避让 macOS 原生红黄绿交通灯，呈现真正原生苹果视觉 */
 }
+[data-platform="windows"] .hud-status-group,
+[data-platform="linux"] .hud-status-group {
+  padding-left: 6px;
+}
 
 /* 实时同传状态开关胶囊大按钮 */
 .live-status-pill {
@@ -1567,6 +1571,331 @@ button, input, select, textarea, .no-drag {
   background: rgba(16, 185, 129, 0.3);
   color: #ffffff;
 }
+
+/* ==========================================================================
+   新增交互：「我自己 (Me)」声纹认领 + 字幕内联态度胶囊 + 底部快捷输入秒译栏 (Quick Speak Dock)
+   ========================================================================== */
+
+.clickable-avatar {
+  cursor: pointer;
+  transition: transform 0.16s ease, box-shadow 0.16s ease;
+}
+.clickable-avatar:hover {
+  transform: scale(1.12);
+  box-shadow: 0 0 12px rgba(74, 222, 128, 0.45);
+}
+
+.stream-turn-block.is-me-turn {
+  background: rgba(34, 197, 94, 0.035);
+  border-left: 2px solid rgba(74, 222, 128, 0.45);
+}
+.stream-turn-block.is-me-turn:hover {
+  background: rgba(34, 197, 94, 0.065);
+}
+
+.turn-claim-me-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #94a3b8;
+  font-size: 9.5px;
+  font-weight: 500;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.16s ease;
+}
+.stream-turn-block:hover .turn-claim-me-btn,
+.turn-claim-me-btn.active {
+  opacity: 1;
+}
+.turn-claim-me-btn:hover {
+  background: rgba(34, 197, 94, 0.18);
+  border-color: rgba(74, 222, 128, 0.5);
+  color: #4ade80;
+}
+.turn-claim-me-btn.active {
+  background: rgba(34, 197, 94, 0.2);
+  border-color: rgba(74, 222, 128, 0.55);
+  color: #4ade80;
+  font-weight: 600;
+}
+
+.my-speaker-top-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background: rgba(34, 197, 94, 0.16);
+  border: 1px solid rgba(74, 222, 128, 0.45);
+  color: #4ade80;
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.my-speaker-top-pill:hover {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: rgba(248, 113, 113, 0.5);
+  color: #fca5a5;
+}
+.my-speaker-top-pill .ms-clear {
+  font-size: 9px;
+  opacity: 0.75;
+}
+
+.turn-quick-chip,
+.turn-speak-trans-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-size: 10px;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.16s ease;
+  white-space: nowrap;
+}
+.stream-turn-block:hover .turn-quick-chip,
+.stream-turn-block:hover .turn-speak-trans-action {
+  opacity: 1;
+}
+.turn-quick-chip {
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.22);
+  color: #7dd3fc;
+}
+.turn-quick-chip:hover {
+  background: rgba(56, 189, 248, 0.24);
+  border-color: rgba(56, 189, 248, 0.55);
+  color: #ffffff;
+  transform: translateY(-1px);
+}
+.turn-speak-trans-action {
+  background: rgba(16, 185, 129, 0.14);
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  color: #6ee7b7;
+  font-weight: 600;
+}
+.turn-speak-trans-action:hover {
+  background: rgba(16, 185, 129, 0.28);
+  border-color: rgba(52, 211, 153, 0.65);
+  color: #ffffff;
+  transform: translateY(-1px);
+}
+
+/* 常驻底部快捷输入秒译 & 辅助发言栏 (Quick Speak Dock) */
+.quick-speak-dock {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.quick-speak-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 10px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.quick-speak-bar:focus-within {
+  border-color: rgba(56, 189, 248, 0.5);
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.16);
+}
+
+.qs-lang-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.32);
+  color: #38bdf8;
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+.qs-lang-pill:hover {
+  background: rgba(56, 189, 248, 0.26);
+  color: #ffffff;
+}
+.qs-caret {
+  font-size: 9px;
+  opacity: 0.8;
+}
+
+.qs-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  color: #f8fafc;
+  font-size: 12px;
+  font-family: inherit;
+  padding: 3px 4px;
+}
+.qs-input:focus {
+  outline: none;
+}
+.qs-input::placeholder {
+  color: #64748b;
+}
+
+.qs-btn {
+  padding: 4px 9px;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+.qs-btn.primary {
+  background: linear-gradient(135deg, #0284c7, #0ea5e9);
+  border: none;
+  color: #ffffff;
+}
+.qs-btn.primary:hover {
+  filter: brightness(1.12);
+}
+.qs-btn.copilot {
+  background: rgba(168, 85, 247, 0.18);
+  border: 1px solid rgba(192, 132, 252, 0.4);
+  color: #e9d5ff;
+}
+.qs-btn.copilot:hover {
+  background: rgba(168, 85, 247, 0.32);
+  color: #ffffff;
+}
+.qs-btn.note {
+  background: rgba(16, 185, 129, 0.14);
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  color: #6ee7b7;
+}
+.qs-btn.note:hover {
+  background: rgba(16, 185, 129, 0.28);
+  color: #ffffff;
+}
+
+/* 口语秒译结果悬浮卡片 */
+.quick-speak-result-card {
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.94), rgba(30, 41, 59, 0.9));
+  border: 1px solid rgba(52, 211, 153, 0.45);
+  border-radius: 10px;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4), 0 0 14px rgba(16, 185, 129, 0.12);
+  animation: popIn 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.qsr-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10.5px;
+}
+.qsr-badge {
+  background: rgba(16, 185, 129, 0.2);
+  border: 1px solid rgba(52, 211, 153, 0.4);
+  color: #6ee7b7;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  font-weight: 600;
+}
+.qsr-orig {
+  color: #94a3b8;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.qsr-close {
+  background: transparent;
+  border: none;
+  color: #64748b;
+  cursor: pointer;
+  font-size: 12px;
+}
+.qsr-close:hover {
+  color: #ffffff;
+}
+.qsr-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #cbd5e1;
+  padding: 4px 0;
+}
+.qsr-main-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.qsr-main-row:hover {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: rgba(52, 211, 153, 0.45);
+}
+.qsr-spoken-text {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: #f0fdf4;
+  line-height: 1.4;
+}
+.qsr-copy-hint {
+  font-size: 10px;
+  color: #6ee7b7;
+  white-space: nowrap;
+}
+.qsr-alt-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #cbd5e1;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 5px;
+}
+.qsr-alt-row:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #ffffff;
+}
+.qsr-alt-tag {
+  font-size: 9.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(56, 189, 248, 0.16);
+  color: #38bdf8;
+  font-weight: 600;
+}
+.qsr-tip-row {
+  font-size: 11px;
+  color: #fcd34d;
+  padding-left: 2px;
+}
+
 
 
 

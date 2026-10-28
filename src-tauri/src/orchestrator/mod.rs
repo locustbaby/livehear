@@ -276,6 +276,9 @@ impl LiveHearOrchestrator {
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 println!("ℹ️ [LiveHear] ASR 流接收通道已关闭");
+                                if is_running_clone.swap(false, Ordering::SeqCst) {
+                                    let _ = app_stream.emit("asr-status", "stopped");
+                                }
                                 break;
                             }
                         }

@@ -15,8 +15,8 @@ pub fn shared_http_client() -> Client {
                 .pool_max_idle_per_host(16)
                 .pool_idle_timeout(std::time::Duration::from_secs(90))
                 .tcp_nodelay(true)
-                .connect_timeout(std::time::Duration::from_secs(2))
-                .timeout(std::time::Duration::from_secs(6))
+                .connect_timeout(std::time::Duration::from_secs(3))
+                .timeout(std::time::Duration::from_secs(18))
                 .build()
                 .unwrap_or_else(|_| Client::new())
         })
@@ -75,6 +75,31 @@ pub struct LookupResult {
     pub term_pair: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuickSpeakResult {
+    pub spoken: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip: Option<String>,
+    #[serde(default)]
+    pub target_lang: String,
+}
+
+fn lang_code_to_display_name(code: &str) -> &'static str {
+    match code.trim().to_ascii_lowercase().as_str() {
+        "en" => "英语 (English)",
+        "ja" => "日语 (日本語)",
+        "th" => "泰语 (ไทย)",
+        "ko" => "韩语 (한국어)",
+        "fr" => "法语 (Français)",
+        "de" => "德语 (Deutsch)",
+        "es" => "西班牙语 (Español)",
+        "zh" => "中文",
+        _ => "英语 (English)",
+    }
+}
+
 pub struct OpenRouterAdapter {
     config: OpenRouterConfig,
     client: Client,
@@ -96,6 +121,7 @@ impl OpenRouterAdapter {
         low_confidence_words: &[String],
         meeting_context: &str,
         custom_terms: &[String],
+        target_lang: Option<&str>,
     ) -> Result<PolishResult, LiveHearError> {
         let api_key = self.config.api_key.trim();
         if api_key.is_empty() {
@@ -129,14 +155,32 @@ impl OpenRouterAdapter {
             )
         };
 
-        let system_prompt = "你是一个精通跨国技术会议、架构评审与商务沟通的首席同传译员兼语音识别(ASR)纠偏专家。\n\
+        let eff_target = target_lang.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("zh");
+        let is_speak_foreign = !eff_target.eq_ignore_ascii_case("zh");
+        let target_lang_name = lang_code_to_display_name(eff_target);
+
+        let system_prompt = if is_speak_foreign {
+            format!(
+                "你是一个精通跨国技术会议、架构评审与商务沟通的首席同传译员、口语辅助智囊兼语音识别(ASR)纠偏专家。\n\
+用户当前正在发言（可能说了中文或中英夹杂），需要将这句话翻译并润色为可直接照念的地道【{}】口语表达。\n\
+请同时完成以下三项任务：\n\
+1. 【原声 ASR 听写纠偏 (original)】：结合前后文语境、会议背景、专有术语表与低置信度词提示，修复原声识别中因同音字、吞音或技术缩略词导致的听写错误，保持说话人原本的语种。\n\
+2. 【目标外语口语翻译与润色 (translated)】：基于纠偏后的原声，结合前序对话语境，将其翻译并润色为自然地道、专业得体、适合在会议现场直接脱口而出的【{}】口语表达（不要输出中文解释，仅输出纯净的目标语言句子）。\n\
+3. 【话语语气与态度标签 (tone_tag)】：给出一个 4~6 字的极简标签（例如：\"🗣️ 英文提词\"、\"✅ 明确表态\"、\"❓ 追问确认\"、\"💡 方案建议\"）；若平铺直叙可填 \"🗣️ 口语辅助\"。\n\
+严禁输出任何解释或 Markdown 代码块包裹，必须且仅输出如下纯 JSON 对象：\n\
+{{\"original\": \"纠偏后的原声文本\", \"translated\": \"地道自然的{}口语译文\", \"tone_tag\": \"🗣️ 口语辅助\"}}",
+                target_lang_name, target_lang_name, target_lang_name
+            )
+        } else {
+            "你是一个精通跨国技术会议、架构评审与商务沟通的首席同传译员兼语音识别(ASR)纠偏专家。\n\
 用户会提供前序对话上下文、当前发言的实时语音识别【原声段落】、声学低置信度词提示及其【流式初步直译】。\n\
 请同时完成以下三项任务：\n\
 1. 【原声 ASR 听写纠偏 (original)】：结合前后文语境、会议背景、专有术语表与低置信度词提示，精准修复原声识别中因同音字、吞音、口音或技术缩略词导致的听写错误，但必须保持说话人原本的语种与原意。\n\
 2. 【译文语义与语气调优 (translated)】：基于纠偏后的原声，结合前序对话中的指代关系（如 it/they/this 指向的具体议题），将初步直译重组为自然地道、术语精准的同传表达，并保留说话人的真实语气（如委婉试探、强烈关切、明确承诺等）。若原声与初步直译同为中文，则将纠偏后的流畅中文同时填入 original 与 translated。\n\
 3. 【话语语气与态度标签 (tone_tag)】：若该句带有明显的沟通态度或会议动作信号，给出一个 4~6 字的极简标签（例如：\"⚠️ 委婉异议\"、\"❓ 追问细节\"、\"✅ 明确承诺\"、\"⏳ 排期风险\"、\"💡 方案建议\"）；若只是普通平铺直叙，则填 null。\n\
 严禁输出任何解释或 Markdown 代码块包裹，必须且仅输出如下纯 JSON 对象：\n\
-{\"original\": \"纠偏后的原声文本\", \"translated\": \"结合前后文调优后的译文\", \"tone_tag\": null}";
+{\"original\": \"纠偏后的原声文本\", \"translated\": \"结合前后文调优后的译文\", \"tone_tag\": null}".to_string()
+        };
 
         let user_content = format!(
             "{}{}{}{}\n【当前原声段落】：{}\n【流式初步直译】：{}",
@@ -309,6 +353,7 @@ impl OpenRouterAdapter {
         recent_history: &str,
         user_intent: Option<&str>,
         meeting_context: &str,
+        target_lang: Option<&str>,
     ) -> Result<Vec<ReplySuggestion>, LiveHearError> {
         let api_key = self.config.api_key.trim();
         if api_key.is_empty() {
@@ -317,12 +362,18 @@ impl OpenRouterAdapter {
             ));
         }
 
+        let eff_lang = target_lang.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("en");
+        let lang_name = lang_code_to_display_name(eff_lang);
+
         let intent_clause = match user_intent.map(str::trim).filter(|s| !s.is_empty()) {
             Some(intent) => format!(
-                "【我方想要表达的核心想法 / 意图】：\"{}\"\n请围绕我方这一想法，结合前序对话语境，生成 3 种不同语气/角度（如：专业得体直述 / 委婉协商推进 / 简明确认细节）的英文会议发言提词（附简短中文对照）。",
-                intent
+                "【我方想要表达的核心想法 / 意图】：\"{}\"\n请围绕我方这一想法，结合前序对话语境，生成 3 种不同语气/角度（如：专业得体直述 / 委婉协商推进 / 简明确认细节）的【{}】会议发言提词（附简短中文对照）。",
+                intent, lang_name
             ),
-            None => "【请求类型】：我方准备接话发言。\n请紧密结合最近几句对话上下文，从 3 个最实用的会议接话角度（1. 赞同并补充推进 / 2. 追问关键技术或排期细节 / 3. 同步我方进展或稳妥表态），生成 3 条可直接照念的地道英文发言提词（附简短中文对照）。".to_string(),
+            None => format!(
+                "【请求类型】：我方准备接话发言。\n请紧密结合最近几句对话上下文，从 3 个最实用的会议接话角度（1. 赞同并补充推进 / 2. 追问关键技术或排期细节 / 3. 同步我方进展或稳妥表态），生成 3 条可直接照念的地道【{}】发言提词（附简短中文对照）。",
+                lang_name
+            ),
         };
 
         let prompt = format!(
@@ -330,16 +381,17 @@ impl OpenRouterAdapter {
             【当前会议背景】：{}\n\
             【最近对话上下文】：\n{}\n\
             {}\n\n\
-            要求：每条 `detail` 采用「地道口语英文原句 (对应中文大意)」格式，简练自然，适合在会议中直接脱口而出。\n\
+            要求：每条 `detail` 采用「地道口语{}原句 (对应中文大意)」格式，简练自然，适合在会议中直接脱口而出。\n\
             输出必须为纯 JSON 数组：\n\
             [\n\
-              {{\"id\": 1, \"shortcut\": \"Cmd+1\", \"strategy\": \"optimistic\", \"title\": \"场景标签(4-6字)\", \"detail\": \"English sentence to speak directly. (对应的中文意思)\"}},\n\
-              {{\"id\": 2, \"shortcut\": \"Cmd+2\", \"strategy\": \"conservative\", \"title\": \"场景标签(4-6字)\", \"detail\": \"English sentence to speak directly. (对应的中文意思)\"}},\n\
-              {{\"id\": 3, \"shortcut\": \"Cmd+3\", \"strategy\": \"blocker\", \"title\": \"场景标签(4-6字)\", \"detail\": \"English sentence to speak directly. (对应的中文意思)\"}}\n\
+              {{\"id\": 1, \"shortcut\": \"Cmd+1\", \"strategy\": \"optimistic\", \"title\": \"场景标签(4-6字)\", \"detail\": \"Spoken sentence in target language. (对应的中文意思)\"}},\n\
+              {{\"id\": 2, \"shortcut\": \"Cmd+2\", \"strategy\": \"conservative\", \"title\": \"场景标签(4-6字)\", \"detail\": \"Spoken sentence in target language. (对应的中文意思)\"}},\n\
+              {{\"id\": 3, \"shortcut\": \"Cmd+3\", \"strategy\": \"blocker\", \"title\": \"场景标签(4-6字)\", \"detail\": \"Spoken sentence in target language. (对应的中文意思)\"}}\n\
             ]",
             meeting_context,
             if recent_history.trim().is_empty() { "（会议刚开始，暂无前序记录）" } else { recent_history.trim() },
-            intent_clause
+            intent_clause,
+            lang_name
         );
 
         let model_to_use = if !self.config.translate_model.trim().is_empty() {
@@ -415,6 +467,118 @@ impl OpenRouterAdapter {
         }
 
         Err(LiveHearError::LlmError("未能解析提词结果".to_string()))
+    }
+
+    pub async fn quick_speak_translate(
+        &self,
+        text: &str,
+        target_lang: &str,
+        recent_history: &str,
+        meeting_context: &str,
+        custom_terms: &[String],
+    ) -> Result<QuickSpeakResult, LiveHearError> {
+        let api_key = self.config.api_key.trim();
+        if api_key.is_empty() {
+            return Err(LiveHearError::ConfigError(
+                "请先在设置中配置 AI 智囊 API Key".to_string(),
+            ));
+        }
+
+        let eff_lang = if target_lang.trim().is_empty() {
+            "en"
+        } else {
+            target_lang.trim()
+        };
+        let lang_name = lang_code_to_display_name(eff_lang);
+
+        let terms_hint = if custom_terms.is_empty() {
+            String::new()
+        } else {
+            format!("\n【专有术语表】：{}", custom_terms.join(", "))
+        };
+
+        let history_hint = if recent_history.trim().is_empty() {
+            String::new()
+        } else {
+            format!("\n【最近对话上下文】：\n{}", recent_history.trim())
+        };
+
+        let prompt = format!(
+            "你是一个跨国会议现场的实时口语翻译与表达助手。\n\
+            【当前会议背景】：{}{}{}\n\
+            【我方准备开口说的原意（中文或中英夹杂）】：\"{}\"\n\n\
+            请将其转化为最地道、自然、适合在跨国会议现场直接脱口而出的【{}】口语表达。\n\
+            严禁输出任何多余解释或 Markdown 代码块，必须且仅输出如下纯 JSON 对象：\n\
+            {{\n\
+              \"spoken\": \"最自然得体、可直接照念的{}口语完整句\",\n\
+              \"alt\": \"更简短干练的口语替代表达（适合快节奏插话）\",\n\
+              \"tip\": \"核心词汇发音/重音提示或地道用法点拨（15字以内，如无可填 null）\"\n\
+            }}",
+            meeting_context, terms_hint, history_hint, text, lang_name, lang_name
+        );
+
+        let model_to_use = if !self.config.translate_model.trim().is_empty() {
+            self.config.translate_model.clone()
+        } else {
+            self.config.predict_model.clone()
+        };
+
+        let payload = ChatCompletionRequest {
+            model: model_to_use,
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: prompt,
+            }],
+            temperature: Some(0.2),
+            max_tokens: Some(420),
+        };
+
+        let url = format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'));
+        let res = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| LiveHearError::NetworkError(e.to_string()))?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            return Err(LiveHearError::LlmError(format!("LLM 接口错误 ({}): {}", status, body)));
+        }
+
+        let data: ChatCompletionResponse = res
+            .json()
+            .await
+            .map_err(|e| LiveHearError::SerializationError(e.to_string()))?;
+
+        let raw = data
+            .choices
+            .first()
+            .map(|c| c.message.content.trim().to_string())
+            .unwrap_or_default();
+
+        if let Some(start) = raw.find('{') {
+            if let Some(end) = raw.rfind('}') {
+                if let Ok(mut parsed) = serde_json::from_str::<QuickSpeakResult>(&raw[start..=end]) {
+                    parsed.target_lang = eff_lang.to_string();
+                    parsed.alt = parsed.alt.filter(|s| !s.trim().is_empty() && s != "null");
+                    parsed.tip = parsed.tip.filter(|s| !s.trim().is_empty() && s != "null");
+                    if !parsed.spoken.trim().is_empty() {
+                        return Ok(parsed);
+                    }
+                }
+            }
+        }
+
+        Ok(QuickSpeakResult {
+            spoken: if raw.is_empty() { text.to_string() } else { raw },
+            alt: None,
+            tip: None,
+            target_lang: eff_lang.to_string(),
+        })
     }
 
     pub async fn summarize_recent_context(

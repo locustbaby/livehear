@@ -13,6 +13,7 @@ export interface FullAppConfig {
     enable_translation?: boolean;
     translation_type?: 'one_way' | 'two_way' | string;
     target_language?: string;
+    speak_target_language?: string;
     language_a?: string;
     language_b?: string;
     max_endpoint_delay_ms?: number;
@@ -96,4 +97,11 @@ export interface OrchestratedEventPayload {
   segment: TranscriptSegment;
   intent?: string;
   suggestions?: ReplySuggestion[];
+}
+
+export interface QuickSpeakResult {
+  spoken: string;
+  alt?: string | null;
+  tip?: string | null;
+  target_lang: string;
 }

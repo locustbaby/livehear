@@ -11,6 +11,7 @@
     "enable_translation": true,
     "translation_type": "one_way",
     "target_language": "zh",
+    "speak_target_language": "en",
     "language_a": "en",
     "language_b": "zh",
     "max_endpoint_delay_ms": 2000,

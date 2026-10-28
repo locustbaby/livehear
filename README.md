@@ -27,10 +27,17 @@
 - **语用语气与潜台词识别 (`tone_tag`)**：自动标注定稿句子的语用色彩（如 `🔍 追问求证`、`⚠️ 委婉异议`、`📌 明确承诺`、`⏳ 缓兵推迟`、`🤝 寻求共识`），跨文化沟通不错过言外之意。
 - **双击单词 / 划选短语语境精译**：在字幕区双击任意单词或划选短语，立即弹出悬浮词典卡片，展示音标、词典释义与当前会议语境下的精准含义，支持一键 **`+ 加入术语表`** 热更新 Soniox 识别词库。
 
-### 4. 主动发言提词器 (Speaking Co-Pilot) 与一键 AI 纪要
-- **主动接话 (`💡 帮我接话` / `⌘+K`)**：轮到你发言或被提问时，按下 `⌘+K` 或点击任意字幕右侧的 `💬 接话`，可输入简短中文意图（如“委婉推迟到下周”、“同意方案但需加人手”）或留空，1 秒生成 **3 条地道双语口语发言稿**，按 `Alt+1/2/3` 一键复制。
-- **3 秒浓缩前文 (`📝 浓缩前文`)**：走神或刚进会时，一键将最近对话浓缩为 3 条核心要点（刚才在聊什么 / 核心争议或结论 / 当前轮到谁回应）。
-- **时间轴快速打点 (`📌 记笔记`) 与结构化 AI 纪要导出**：会中随时记录关键灵感并嵌入时间轴；会后点击保存（`💾`）可一键生成包含议题摘要、关键决议、待办 Action Items 与完整双语逐字稿的 Markdown 会议纪要。
+### 4. 交互式「我」绑定与主动辅助发言 (Speak Assistant & Co-Pilot)
+- **交互式「我」身份认领 (`👆 设为我` / `🎙️ 我`)**：
+  - 无需猜测语种归属，点击任意字幕行的头像或 **`👆 设为我`** 即可将该说话人（如 `Speaker 2`）绑定为「我自己」，顶栏实时显示 `🎙️ 我: Speaker X ✕` 胶囊（可随时点击取消或切换）。
+  - **单向听会 + 智能辅助我 Speak**：保持全局 `target_language = "zh"`（他人说的英语/泰语/日语全部同传为中文），当被标记为「我自己」的 Speaker **说中文**时，自动触发 LLM 口语精译并就地展示地道英文（或你设定的 `speak_target_language`）口语供直接照念；当你直接**说英语**时，保留英文原声与中文对照，并自动屏蔽针对你本人发言的抢答弹窗。
+  - **任意中文单句手动秒译 (`🌐 译为EN`)**：未绑定「我」时，点击任意中文字幕右侧的 `🌐 译为EN` 也可随时将其转化为地道外语口语并复制到剪贴板。
+- **常驻底部「快捷输入秒译 & 辅助发言栏」(Quick Speak Dock)**：
+  - **回车极速口语秒译 (`Enter` / `⚡ 秒译`)**：在底部输入框打几个中文词或半截中英混杂草稿按回车，1 秒内结合最近 4 轮对话语境转化为 **地道会议口语 (`spoken`) + 简短替代句 (`alt`) + 发音/语境提示 (`tip`)**，并自动复制到剪贴板。
+  - **多角度建议生成 (`Shift+Enter` / `✨ 3种建议`)**：生成 3 条不同策略（直接回应 / 补充推进 / 委婉周旋）的双语发言稿。
+  - **一键切换发言目标外语 (`🗣️ 译为:EN ▾`)**：支持在 `EN / JA / TH / KO / FR / DE / ES` 间循环切换。
+- **字幕行内一键表态 Chips (`👍 赞同` / `⏳ 缓议` / `❓ 追问` / `💬 接话`)**：悬停在对方任意一句话上，无需打字即可一键生成对应态度的地道外语回应。
+- **3 秒浓缩前文 (`📝 浓缩前文`) & 时间轴笔记 (`📌 记笔记`)**：走神或刚进会时一键浓缩最近讨论焦点；会中随时记录灵感嵌入时间轴，会后一键导出包含 AI 高管摘要、核心决议、Action Items 与双语逐字稿的 Markdown 纪要。
 
 ### 5. 隐身防录屏模式与鼠标穿透
 - **隐身防共享模式 (`🕶️` / `⌘+Shift+H`)**：调用系统底层 `set_content_protected(true)`（macOS `NSWindowSharingNone` / Windows `WDA_EXCLUDEFROMCAPTURE`），在 Zoom / Teams / 腾讯会议共享整个桌面或截图时，HUD 窗口对他人完全隐形。
@@ -38,15 +45,15 @@
 
 ---
 
-## 快速开始
+## 快速开始与跨平台构建
 
 ### 环境要求
 - **Node.js** `>= 20` & **pnpm** `>= 9`
 - **Rust** `>= 1.77.2` (含 Cargo 与 Xcode Command Line Tools / MSVC)
 - **Soniox API Key**：用于实时多语种语音识别与流式同传（[Soniox Console](https://console.soniox.com/)）
-- **OpenRouter / OpenAI 兼容 API Key**：用于双轨上下文纠偏、划词精译、主动接话提词与 AI 会议纪要
+- **OpenRouter / OpenAI 兼容 API Key**：用于双轨上下文纠偏、我方中文转外语口语、快捷输入秒译、划词精译、主动接话提词与 AI 会议纪要
 
-### 安装与运行
+### 本地开发与构建
 
 ```bash
 # 1. 安装前端依赖
@@ -55,13 +62,17 @@ pnpm install
 # 2. 启动 Tauri 桌面端开发模式
 pnpm tauri dev
 
-# 3. 构建生产环境原生安装包 (.app / .dmg / .msi)
+# 3. 构建当前操作系统原生安装包 (macOS 下产出 .app / .dmg)
 pnpm tauri build
 ```
 
+### Windows 安装包构建 (GitHub Actions 云端流水线)
+由于 Tauri v2 依赖目标系统的原生 WebView（macOS `WKWebView` / Windows `WebView2`）及 MSVC 链接器，仓库已内置 [`.github/workflows/build-windows.yml`](file:///Users/sexy/Documents/GitHub/livehear/.github/workflows/build-windows.yml) 自动化流水线：
+- 在 GitHub Actions 页面点击 **Build Windows Installer -> Run workflow**（或推送 `v*` 标签），即可在 `windows-latest` 云端环境自动编译并产出 Windows `.exe` (NSIS) 与 `.msi` 安装包产物。
+
 ### 配置文件说明
 
-首次启动时，应用会在系统配置目录（macOS 下为 `~/Library/Application Support/com.livehear.client/config.json`，也可通过环境变量 `LIVEHEAR_CONFIG` 指定路径）自动生成配置文件。你可以直接在 HUD 右上角的 **`⚙️ 设置`** 面板中可视化修改并热更新，或参考项目根目录下的 [`livehear.config.example.json`](file:///Users/sexy/Documents/GitHub/livehear/livehear.config.example.json)。
+首次启动时，应用会在项目目录或系统配置目录自动读取 `livehear.config.json`（已被 `.gitignore` 忽略，防止密钥泄露）。你可以直接在 HUD 右上角的 **`⚙️ 设置`** 面板中可视化修改并热更新，或参考项目根目录下的 [`livehear.config.example.json`](file:///Users/sexy/Documents/GitHub/livehear/livehear.config.example.json)。
 
 ---
 
@@ -69,14 +80,41 @@ pnpm tauri build
 
 | 快捷键 | 功能说明 |
 | :--- | :--- |
-| `⌘ + K` / `Ctrl + K` | 呼出 / 收起 **主动发言提词 (Speaking Co-Pilot)** 抽屉并聚焦意图输入框 |
-| `Alt + 1` / `2` / `3` | 一键复制第 1 / 2 / 3 条双语接话建议或发言提词 |
+| `Enter`（底部输入框） | 将输入的中文/草稿 **极速秒译为地道目标外语口语** 并自动复制 |
+| `Shift + Enter`（底部输入框） | 结合上下文生成 **3 种不同语气的发言提词卡片** |
+| `⌘ + K` / `Ctrl + K` | 呼出 / 刷新 **主动发言提词 (Speaking Co-Pilot)** 抽屉 |
+| `⌘ + 1` / `2` / `3` | 一键复制第 1 / 2 / 3 条双语接话建议或发言提词 |
 | `⌘ + Shift + H` | 切换 **隐身防录屏模式 (Stealth Mode)**（共享屏幕/录屏时隐藏 HUD） |
 | `⌘ + Shift + X` | 切换 **幽灵鼠标穿透模式 (Click-Through Mode)** |
+| `⌘ + Shift + P` | 切换 **窗口置顶固定 (Always on Top)** |
+| `⌘ + Shift + C` | 一键清空当前字幕流 |
+| `⌘ + Shift + E` | 一键导出 **AI 结构化会议纪要 (.md / .txt)** |
 | `双击单词` / `划选文字` | 弹出 **当前会议语境词典精译卡片**（支持一键加入识别术语表） |
+
+---
+
+## 参考的主要开源项目与设计借鉴
+
+LiveHear 在架构设计与交互打磨过程中，深度调研并融合了以下代表性开源项目的设计精华：
+
+1. **[SevaSk/ecoute](https://github.com/SevaSk/ecoute)**
+   - **核心定位**：实时双轨转录与智能应答建议鼻祖。
+   - **设计借鉴**：借鉴其对「对方语音 vs 我方语音」进行角色标记并拼接成带角色标签的对话历史（`[对方 (Speaker 1)]` / `[我 (Speaker 2)]`），使 LLM 在生成回复建议与指代消解时清晰区分提问方与作答方。
+2. **[Pluely](https://github.com/iamsrikanthnani/pluely) / [Natively](https://github.com/natively-ai/natively-cluely-ai-assistant) / [Free-Cluely](https://github.com/Prat011/free-cluely)**（开源版 Cluely 隐身会议 Copilot）
+   - **核心定位**：防录屏隐身悬浮窗 + 实时会议主动提词器。
+   - **设计借鉴**：借鉴其系统级防截屏/防桌面共享 API（`NSWindowSharingNone` / `WDA_EXCLUDEFROMCAPTURE`）、快捷表态 Chips（赞同 / 缓议 / 追问 / 浓缩前文 TL;DR）以及常驻底部的无打扰快捷输入交互栏（Quick Speak Dock）。
+3. **[BetterAndBetterII/my-translator](https://github.com/BetterAndBetterII/my-translator) & [Mixed-Languages-Translator](https://github.com/unpacking622/Mixed-Languages-Translator)**
+   - **核心定位**：基于 Tauri v2 (Rust + WebView) 的轻量级桌面实时双语字幕浮窗。
+   - **设计借鉴**：参考其 Tauri v2 透明无边框置顶 HUD 窗口管理、鼠标点击穿透（Click-Through）以及单实例多语种混合会议场景下的非对称翻译策略。
+4. **[Fastrepl/hyprnote (Char)](https://github.com/fastrepl/char) & [Zackriya-Solutions/meeting-minutes](https://github.com/Zackriya-Solutions/meeting-minutes)**
+   - **核心定位**：隐私优先的 Rust + Tauri AI 会议实时笔记与结构化纪要生成。
+   - **设计借鉴**：借鉴其「会中时间轴随手记笔记（`📌 记笔记`）+ 实时转录流」在会后通过 LLM 融合提炼为高管摘要、关键决议与 Action Items 的工作流。
+5. **[Transkit](https://github.com/transkit-ai/transkit)**
+   - **核心定位**：基于 Tauri 的 AI 划词翻译与语境词典桌面助手。
+   - **设计借鉴**：参考其双击/划选字幕文本即刻弹出语境释义与一键沉淀专有术语表（Context Terms）的闭环体验。
 
 ---
 
 ## 架构与技术规范
 
-关于音频 DSP 处理链、Soniox `stt-rt-v5` 双流状态机、说话人防抖算法、LLM 双轨后处理协议及 60fps 零重排 DOM 渲染架构的详细设计，请参阅 [`ARCHITECTURE.md`](file:///Users/sexy/Documents/GitHub/livehear/ARCHITECTURE.md)。
+关于音频 DSP 处理链、Soniox `stt-rt-v5` 双流状态机、说话人防抖算法、LLM 双轨后处理协议、Speak 辅助状态机及 60fps 零重排 DOM 渲染架构的详细设计，请参阅 [`ARCHITECTURE.md`](file:///Users/sexy/Documents/GitHub/livehear/ARCHITECTURE.md)。

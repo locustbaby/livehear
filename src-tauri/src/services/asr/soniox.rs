@@ -197,11 +197,21 @@ impl SonioxLiveAdapter {
         }
 
         if self.config.translation_type == "two_way" {
+            let lang_a = if !self.config.speak_target_language.trim().is_empty() {
+                self.config.speak_target_language.trim().to_string()
+            } else {
+                self.config.language_a.clone()
+            };
+            let lang_b = if !self.config.target_language.trim().is_empty() {
+                self.config.target_language.trim().to_string()
+            } else {
+                self.config.language_b.clone()
+            };
             Some(SonioxTranslationPayload {
                 translation_type: "two_way".to_string(),
                 target_language: None,
-                language_a: Some(self.config.language_a.clone()),
-                language_b: Some(self.config.language_b.clone()),
+                language_a: Some(lang_a),
+                language_b: Some(lang_b),
             })
         } else {
             Some(SonioxTranslationPayload {
@@ -901,6 +911,9 @@ impl ASRService for SonioxLiveAdapter {
                             Some(Ok(m)) => m,
                             Some(Err(e)) => {
                                 eprintln!("⚠️ [Soniox WebSocket 读取异常]: {}", e);
+                                if let Some(ref app) = app_handle_read {
+                                    let _ = app.emit("asr-error", format!("Soniox 连接中断: {}", e));
+                                }
                                 break;
                             }
                             None => break,
@@ -940,6 +953,12 @@ impl ASRService for SonioxLiveAdapter {
 
                         if let Some(err) = resp.error_message {
                             eprintln!("⚠️ [Soniox API Error] code {:?}: {}", resp.error_code, err);
+                            if let Some(ref app) = app_handle_read {
+                                let _ = app.emit(
+                                    "asr-error",
+                                    format!("Soniox 服务端返回错误 ({:?}): {}", resp.error_code.unwrap_or(0), err),
+                                );
+                            }
                             continue;
                         }
 

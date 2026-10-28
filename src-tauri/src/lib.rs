@@ -41,6 +41,7 @@ pub fn run() {
             commands::polish_transcript,
             commands::lookup_selection,
             commands::generate_copilot_prompts,
+            commands::quick_speak_translate,
             commands::list_audio_devices,
             commands::set_stealth_mode,
             commands::set_click_through,
