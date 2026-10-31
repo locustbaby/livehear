@@ -8,6 +8,12 @@ export interface SubtitleItem {
   isTrackRemote: boolean;
   original: string;
   translated: string;
+  rawOriginal?: string;
+  rawTranslation?: string;
+  aiOriginal?: string;
+  aiTranslation?: string;
+  showingRaw?: boolean;
+  translationStatus?: 'pending' | 'unavailable';
   confirmedOriginal?: string;
   provisionalOriginal?: string;
   confirmedTranslated?: string;
@@ -160,8 +166,22 @@ export function renderHudView(
             <span id="topbarLangBadgeText">${escapeHtml(formatTopbarLangBadgeText(config))}</span>
           </button>
 
+          <button class="lang-auto-badge no-drag interactive-lang-pill"
+                  id="btnAsrBackend"
+                  title="切换识别引擎；本地模式使用分段识别，不支持说话人分离"
+                  onclick="window.__livehear_action('toggleAsrBackend')">
+            ${config?.asr_backend?.provider === 'ollama' ? '识别：Ollama' : '识别：Soniox'}
+          </button>
+          <button class="lang-auto-badge no-drag interactive-lang-pill"
+                  id="btnTogglePolish"
+                  aria-pressed="${config?.openrouter?.enable_polish !== false}"
+                  title="后续定稿字幕去除无意义语气词、结合上下文重译；需要 AI API Key，会产生模型费用"
+                  onclick="window.__livehear_action('togglePolish')">
+            ${config?.openrouter?.enable_polish !== false ? '✨ AI 整理：开' : 'AI 整理：关'}
+          </button>
+
           <!-- 智能 VAD 节费状态微标 -->
-          <div class="vad-eco-badge" title="智能静音降费门禁已激活：静音时不推流扣费，节省 60-70% Token 支出">
+          <div class="vad-eco-badge" title="静音门禁可减少音频发送；实际费用以服务商账单为准">
             <span class="eco-leaf">🌱</span>
             <span>静音降费</span>
           </div>
@@ -206,11 +226,6 @@ export function renderHudView(
 
         <!-- 右侧状态徽章与快捷工具 -->
         <div class="hud-badges no-drag">
-          <!-- 实时流式同传延时指示 (由后端 soniox-latency 实时驱动) -->
-          <span class="latency-badge" id="hudLatencyBadge" title="Soniox 端到端流式往返极速延时">
-            ⚡ ${state.sonioxLatencyMs || 64}ms
-          </span>
-
           <!-- 一键发言提词 / 帮我接话按钮 -->
           <button class="copilot-trigger-pill no-drag ${state.hasPredictSuggestion ? 'active' : ''}"
                   id="btnOpenCopilot"
@@ -337,7 +352,7 @@ export function renderEmptyPlaceholder(isStreaming: boolean, hasPermission: bool
             ? 'LiveHear 需要麦克风权限来捕获实时发言并完成同传翻译。点击下方按钮授予授权：'
             : isStreaming
             ? '请开始说话（无需指定语言，Soniox 会自动识别全语种及说话人声纹，并在毫秒级流式打字上屏）。'
-            : '点击顶部「开始同传」按钮以开启系统声音与麦克风采集。'
+            : '点击顶部「开始同传」按钮，从所选音频输入设备开始识别。'
         }
       </div>
       ${
@@ -409,7 +424,7 @@ export function renderSubtitleTurnHtml(
     transTrim !== '正在同传中...' &&
     transTrim !== origTrim &&
     (!isMainlyChinese(transTrim) || (transLang !== null && transLang !== 'zh'));
-  const isNativeZh = isChineseSpeech && !hasForeignTranslation;
+  const isNativeZh = isChineseSpeech && !hasForeignTranslation && !item.translationStatus;
 
   // 复制内容：默认优先复制最清晰的译文，若为纯中文直接复制原文
   const copyContent = isNativeZh ? (origTrim || transTrim) : (transTrim || origTrim);
@@ -436,6 +451,7 @@ export function renderSubtitleTurnHtml(
   const displaySpeakerName = isMe && item.speakerId ? `我 (${item.speaker})` : item.speaker;
 
   const actionButtonsHtml = `
+    ${item.rawOriginal && (item.aiOriginal || item.aiTranslation) ? `<button class="turn-copy-action no-drag" onclick="window.__livehear_action('toggleTranscriptVersion', '${escapeJs(item.id)}')">${item.showingRaw ? '查看 AI 版' : '恢复原始版'}</button>` : ''}
     ${
       isChineseSpeech
         ? `
@@ -494,7 +510,7 @@ export function renderSubtitleTurnHtml(
                     ${canSelectSpeaker ? `onclick="window.__livehear_action('toggleMySpeaker', ${item.speakerId})"` : ''}></div>`
             : `
           <div class="turn-speaker-avatar ${speakerClass} ${canSelectSpeaker ? 'clickable-avatar no-drag' : ''}"
-               title="${canSelectSpeaker ? (isMe ? '当前已设为「我自己」· 点击取消绑定' : `点击将 ${item.speaker} 设为「我自己」(我说中文将自动译为 ${speakUpper})`) : escapeHtml(displaySpeakerName)}"
+               title="${canSelectSpeaker ? (isMe ? '当前已设为「我自己」· 点击取消绑定' : `点击将 ${escapeHtml(item.speaker)} 设为「我自己」(我说中文将自动译为 ${escapeHtml(speakUpper)})`) : escapeHtml(displaySpeakerName)}"
                ${canSelectSpeaker ? `onclick="window.__livehear_action('toggleMySpeaker', ${item.speakerId})"` : ''}>
             <span class="avatar-icon">${isMe ? '🎙️' : '👤'}</span>
           </div>
@@ -555,6 +571,7 @@ export function renderSubtitleTurnHtml(
         <!-- 文本流内容区：显式清晰标注 [同传] 与 [原声] -->
         <div class="turn-body">
           ${renderTurnTextLines(item, displayMode, isNativeZh, detected)}
+          ${!item.isPartial && item.rawOriginal ? `<details class="raw-transcript no-drag"><summary>查看原始识别${item.aiOriginal || item.aiTranslation ? ' · 已有 AI 整理' : ''}</summary><div>原始识别：${escapeHtml(item.rawOriginal)}</div>${item.rawTranslation ? `<div>原始译文：${escapeHtml(item.rawTranslation)}</div>` : ''}</details>` : ''}
         </div>
       </div>
     </div>
@@ -603,11 +620,14 @@ function renderTurnTextLines(
   }
 
   // 跨语言场景：原声 + 实时流式同传
-  const badgeTitle = item.isPolished ? 'AI 智能语境串联润色' : 'Soniox 实时流式同传译文';
+  const badgeTitle = item.isPolished ? 'AI 智能语境串联润色' : '实时翻译结果';
   const badgeText = item.isPolished ? '同传 · 润色' : '同传';
   const fallbackTrans = item.translated || (item.isPartial ? '正在同传中...' : item.original);
-  const transBody =
-    item.isPartial && (item.confirmedTranslated || item.provisionalTranslated)
+  const transBody = item.translationStatus === 'pending'
+    ? `<span class="token-provisional">正在翻译…</span>`
+    : item.translationStatus === 'unavailable'
+    ? `<span class="token-provisional">译文不可用</span>`
+    : item.isPartial && (item.confirmedTranslated || item.provisionalTranslated)
       ? renderSegmentedTokens(
           fallbackTrans,
           item.confirmedTranslated,
@@ -874,7 +894,7 @@ export function renderQuickLangPopoverHtml(config: FullAppConfig): string {
         </div>
         <div class="ql-custom-row">
           <input type="text" id="quickHintsInput" value="${escapeHtml(hintsStr)}" placeholder="自定义语种代码: en, zh, th, ja, ko..." />
-          <label class="ql-strict-toggle" title="开启后 Soniox 仅在上方指定语种内解码，彻底杜绝乱码">
+          <label class="ql-strict-toggle" title="限制识别范围；未列入的语种可能无法正确识别">
             <input type="checkbox" id="quickStrictCheckbox" ${isStrict ? 'checked' : ''} />
             <span>🔒 严格锁定</span>
           </label>
@@ -1006,12 +1026,20 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
 
         <div class="settings-body">
           <div class="setting-group">
+            <label>语音识别引擎</label>
+            <select id="cfgAsrProvider">
+              <option value="soniox" ${config.asr_backend?.provider !== 'ollama' ? 'selected' : ''}>Soniox（实时翻译和说话人区分）</option>
+              <option value="ollama" ${config.asr_backend?.provider === 'ollama' ? 'selected' : ''}>Ollama（本地分段识别）</option>
+            </select>
+            <div class="setting-tip">本地模式优先在停顿处分段，连续发言约 8 秒时切分；不支持说话人区分或双向自动互译，翻译依赖 AI 服务。</div>
+          </div>
+          <div class="setting-group">
             <label>Soniox API Key (项目专有密钥)</label>
             <div class="input-with-button">
               <input type="password" id="cfgSonioxApiKey" value="${escapeHtml(config.soniox.api_key)}" placeholder="snx_proj_..." />
               <button class="btn-subtle" onclick="window.__livehear_action('testSonioxConnection')">⚡ 测试连通</button>
             </div>
-            <div class="setting-tip">基于 Soniox stt-rt-v5 极速流式引擎，支持原生声纹说话人分离与低至 60ms 同传打字上屏。</div>
+            <div class="setting-tip">Soniox 提供实时识别、翻译和说话人区分，实际延迟取决于音频、网络和断句设置。</div>
           </div>
 
           <div class="setting-group">
@@ -1069,7 +1097,7 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
             <input type="text" id="cfgLanguageHints" value="${escapeHtml(hintsStr)}" placeholder="en, zh" />
             <label class="checkbox-label" style="margin-top: 6px;">
               <input type="checkbox" id="cfgLanguageHintsStrict" ${config.soniox.language_hints_strict !== false ? 'checked' : ''} />
-              <span>🔒 严格锁定上述语种 (Strict Mode · 杜绝跨语种乱码)</span>
+              <span>🔒 严格限定上述识别语种（请包含会议中可能使用的语言）</span>
             </label>
           </div>
 
@@ -1078,7 +1106,7 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
               <label>多人会议断句窗口 (Endpoint Delay)</label>
               <select id="cfgEndpointDelay">
                 <option value="1500" ${(config.soniox.max_endpoint_delay_ms || 2000) <= 1600 ? 'selected' : ''}>⚡ 紧凑对话 (1500ms · 快节奏问答)</option>
-                <option value="2000" ${(config.soniox.max_endpoint_delay_ms || 2000) > 1600 && (config.soniox.max_endpoint_delay_ms || 2000) <= 2300 ? 'selected' : ''}>🎯 多人会议标准 (2000ms · 语义最准，推荐)</option>
+                <option value="2000" ${(config.soniox.max_endpoint_delay_ms || 2000) > 1600 && (config.soniox.max_endpoint_delay_ms || 2000) <= 2300 ? 'selected' : ''}>🎯 多人会议标准 (2000ms)</option>
                 <option value="2600" ${(config.soniox.max_endpoint_delay_ms || 2000) > 2300 ? 'selected' : ''}>🎙️ 深度长句讨论 (2600ms · 复杂从句最稳)</option>
               </select>
               <div class="setting-tip">留足上下文窗口供 Soniox 完整理解长句语义与声纹，消除半句切碎与直译错误。</div>
@@ -1099,7 +1127,7 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
               <input type="checkbox" id="cfgEnableVad" ${config.soniox.enable_vad !== false ? 'checked' : ''} />
               <span>🌱 开启智能静音降费门禁 (Voice Activity Gating + 自动 Finalize)</span>
             </label>
-            <div class="setting-tip">停顿 &gt;1.2s 自动向 Soniox 发送 <code>finalize</code> 锁定尾句并暂停静音推流，内置 300ms 预卷缓冲与 8s Keepalive 保活。</div>
+            <div class="setting-tip">检测到停顿后发送 <code>finalize</code> 并暂停静音音频，保留约 500ms 的预卷缓冲。</div>
           </div>
 
           <div class="setting-group">
@@ -1135,7 +1163,7 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
               <input type="checkbox" id="cfgEnablePolish" ${config.openrouter?.enable_polish !== false ? 'checked' : ''} />
               <span>✨ 开启 AI 实时同传段落润色串联</span>
             </label>
-            <div class="setting-tip">同一人连续发言沉淀后，自动在后台消除口吃重复，将散碎短句重组成流利高级的技术中文。</div>
+            <div class="setting-tip">同一人连续发言沉淀后，后台结合上下文整理原文并重新翻译；可能产生额外费用。</div>
           </div>
 
           <div class="setting-group">

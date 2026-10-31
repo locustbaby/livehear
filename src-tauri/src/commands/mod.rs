@@ -31,8 +31,8 @@ pub async fn save_config(
     new_config: AppConfig,
     container: State<'_, Arc<AppContainer>>,
 ) -> Result<(), String> {
-    new_config.save().map_err(|e| e.to_string())?;
     let mut conf = container.config.write().await;
+    new_config.save().map_err(|e| e.to_string())?;
     *conf = new_config;
     Ok(())
 }
@@ -110,12 +110,9 @@ pub async fn start_soniox_live(
     app: AppHandle,
     container: State<'_, Arc<AppContainer>>,
 ) -> Result<(), String> {
-    // 确保若已有运行中的协同实例，先安全停止，避免麦克风硬件资源争抢或重复连线
-    {
-        let mut lock = container.orchestrator.write().await;
-        if let Some(old_orch) = lock.take() {
-            old_orch.stop().await;
-        }
+    let mut orchestrator_slot = container.orchestrator.write().await;
+    if let Some(old_orch) = orchestrator_slot.take() {
+        if !old_orch.stop().await { return Err("本地识别收尾超时，部分字幕可能未完成".into()); }
     }
 
     let conf = {
@@ -123,10 +120,12 @@ pub async fn start_soniox_live(
         guard.clone()
     };
 
-    let asr = Arc::new(
-        SonioxLiveAdapter::new(conf.soniox.clone(), Some(app.clone()))
-            .with_meeting_context(conf.meeting.context.clone()),
-    );
+    let asr: Arc<dyn ASRService> = match conf.asr_backend.provider.as_str() {
+        "soniox" => Arc::new(SonioxLiveAdapter::new(conf.soniox.clone(), Some(app.clone()))
+            .with_meeting_context(conf.meeting.context.clone())),
+        "ollama" => Arc::new(crate::services::asr::ollama::OllamaAsr::new(conf.asr_backend.clone(), app.clone())),
+        other => return Err(format!("未知识别引擎: {}", other)),
+    };
     let translator = Arc::new(crate::services::ai::OpenRouterAdapter::new(conf.openrouter.clone()));
     let decision = Arc::new(crate::services::ai::JevAdapter::new(
         conf.jev.clone(),
@@ -143,6 +142,8 @@ pub async fn start_soniox_live(
         conf.meeting.auto_predict,
         conf.soniox.language_a,
         conf.soniox.target_language,
+        conf.asr_backend.provider == "ollama",
+        !conf.openrouter.api_key.trim().is_empty(),
         conf.soniox.enable_vad,
         conf.soniox.vad_threshold,
         conf.soniox.input_device,
@@ -150,8 +151,7 @@ pub async fn start_soniox_live(
 
     orchestrator.start(app).await.map_err(|e| e.to_string())?;
 
-    let mut lock = container.orchestrator.write().await;
-    *lock = Some(orchestrator);
+    *orchestrator_slot = Some(orchestrator);
 
     Ok(())
 }
@@ -160,9 +160,11 @@ pub async fn start_soniox_live(
 pub async fn stop_soniox_live(container: State<'_, Arc<AppContainer>>) -> Result<(), String> {
     let mut lock = container.orchestrator.write().await;
     if let Some(orch) = lock.as_ref() {
-        orch.stop().await;
+        let complete = orch.stop().await;
+        *lock = None;
+        if !complete { return Err("本地识别收尾超时，部分字幕可能未完成".into()); }
+        return Ok(());
     }
-    *lock = None;
     Ok(())
 }
 
@@ -276,6 +278,7 @@ pub async fn polish_transcript(
     recent_history: Option<String>,
     low_confidence_words: Option<Vec<String>>,
     target_lang: Option<String>,
+    speak_mode: Option<bool>,
     container: State<'_, Arc<AppContainer>>,
 ) -> Result<crate::services::ai::openrouter::PolishResult, String> {
     let conf = {
@@ -283,12 +286,7 @@ pub async fn polish_transcript(
         guard.clone()
     };
 
-    let is_speak_foreign = target_lang
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| !s.eq_ignore_ascii_case("zh"))
-        .unwrap_or(false);
+    let is_speak_foreign = speak_mode.unwrap_or(false);
 
     if !conf.openrouter.enable_polish && !is_speak_foreign {
         return Ok(crate::services::ai::openrouter::PolishResult {
@@ -308,6 +306,7 @@ pub async fn polish_transcript(
             &conf.meeting.context,
             &conf.soniox.custom_terms,
             target_lang.as_deref(),
+            is_speak_foreign,
         )
         .await
         .map_err(|e| e.to_string())

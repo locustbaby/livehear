@@ -41,6 +41,17 @@ fn should_evaluate_for_prediction(text: &str) -> bool {
     word_count >= 3 || char_count >= 8
 }
 
+async fn translate_local(
+    service: &dyn TranslationService,
+    text: &str,
+    source: &str,
+    target: &str,
+) -> Result<String, LiveHearError> {
+    tokio::time::timeout(std::time::Duration::from_secs(25), service.translate(text, source, target))
+        .await
+        .map_err(|_| LiveHearError::LlmError("字幕翻译超时".into()))?
+}
+
 pub struct LiveHearOrchestrator {
     asr_service: Arc<dyn ASRService>,
     translation_service: Arc<dyn TranslationService>,
@@ -50,11 +61,16 @@ pub struct LiveHearOrchestrator {
     auto_predict: bool,
     source_language: String,
     target_language: String,
+    local_asr: bool,
+    can_translate: bool,
     enable_vad: bool,
     vad_threshold: f32,
     input_device: Option<String>,
     is_running: Arc<AtomicBool>,
     stop_notify: Arc<Notify>,
+    draining: Arc<AtomicBool>,
+    stream_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    final_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     sequence_counter: Arc<AtomicU64>,
     audio_tx: tokio::sync::Mutex<Option<mpsc::Sender<Vec<u8>>>>,
     audio_capture: tokio::sync::Mutex<NativeAudioCapture>,
@@ -70,6 +86,8 @@ impl LiveHearOrchestrator {
         auto_predict: bool,
         source_language: String,
         target_language: String,
+        local_asr: bool,
+        can_translate: bool,
         enable_vad: bool,
         vad_threshold: f32,
         input_device: Option<String>,
@@ -83,11 +101,16 @@ impl LiveHearOrchestrator {
             auto_predict,
             source_language,
             target_language,
+            local_asr,
+            can_translate,
             enable_vad,
             vad_threshold,
             input_device,
             is_running: Arc::new(AtomicBool::new(false)),
             stop_notify: Arc::new(Notify::new()),
+            draining: Arc::new(AtomicBool::new(false)),
+            stream_task: tokio::sync::Mutex::new(None),
+            final_task: tokio::sync::Mutex::new(None),
             sequence_counter: Arc::new(AtomicU64::new(1)),
             audio_tx: tokio::sync::Mutex::new(None),
             audio_capture: tokio::sync::Mutex::new(NativeAudioCapture::new()),
@@ -127,6 +150,7 @@ impl LiveHearOrchestrator {
                 self.vad_threshold,
                 self.input_device.as_deref(),
             ) {
+                *self.audio_tx.lock().await = None;
                 let err_msg = format!("麦克风启动失败: {}", e);
                 eprintln!("⚠️ [LiveHear] {}", err_msg);
                 let _ = app.emit("asr-status", "error");
@@ -147,6 +171,8 @@ impl LiveHearOrchestrator {
         let auto_predict = self.auto_predict;
         let src_lang = self.source_language.clone();
         let tgt_lang = self.target_language.clone();
+        let local_asr = self.local_asr;
+        let can_translate = self.can_translate;
         let seq_counter_final = self.sequence_counter.clone();
         let seq_counter_stream = self.sequence_counter.clone();
 
@@ -155,7 +181,9 @@ impl LiveHearOrchestrator {
         let app_final = app.clone();
         let is_running_final = self.is_running.clone();
 
-        tokio::spawn(async move {
+        let final_task = tokio::spawn(async move {
+            let mut translations = tokio::task::JoinSet::new();
+            let translation_slots = Arc::new(tokio::sync::Semaphore::new(4));
             while is_running_final.load(Ordering::SeqCst) {
                 let segment_opt = final_rx.recv().await;
                 let mut segment = match segment_opt {
@@ -165,30 +193,26 @@ impl LiveHearOrchestrator {
 
                 let original_text = segment.text.clone();
 
-                // 翻译处理：优先复用 Soniox 原生返回的流式译文，次选配置的翻译服务（带 2 秒超时，防止堵塞）
-                let translated = if let Some(soniox_trans) = segment.translated_text.take() {
+                let translated = if local_asr {
+                    original_text.clone()
+                } else if let Some(soniox_trans) = segment.translated_text.take() {
                     if !soniox_trans.trim().is_empty() {
                         soniox_trans
                     } else if !original_text.trim().is_empty() {
-                        let trans_fut = translation_svc.translate(&original_text, &src_lang, &tgt_lang);
-                        tokio::time::timeout(tokio::time::Duration::from_millis(2000), trans_fut)
-                            .await
-                            .ok()
-                            .and_then(|res| res.ok())
-                            .unwrap_or_else(|| original_text.clone())
-                    } else {
-                        String::new()
-                    }
+                        let source = segment.detected_language.as_deref().unwrap_or(&src_lang);
+                        tokio::time::timeout(tokio::time::Duration::from_secs(2), translation_svc.translate(&original_text, source, &tgt_lang))
+                            .await.ok().and_then(Result::ok).unwrap_or_else(|| original_text.clone())
+                    } else { String::new() }
                 } else if !original_text.trim().is_empty() {
-                    let trans_fut = translation_svc.translate(&original_text, &src_lang, &tgt_lang);
-                    tokio::time::timeout(tokio::time::Duration::from_millis(2000), trans_fut)
-                        .await
-                        .ok()
-                        .and_then(|res| res.ok())
-                        .unwrap_or_else(|| original_text.clone())
-                } else {
-                    String::new()
-                };
+                    let source = segment.detected_language.as_deref().unwrap_or(&src_lang);
+                    tokio::time::timeout(tokio::time::Duration::from_secs(2), translation_svc.translate(&original_text, source, &tgt_lang))
+                        .await.ok().and_then(Result::ok).unwrap_or_else(|| original_text.clone())
+                } else { String::new() };
+                let source_language = segment.detected_language.clone().unwrap_or_else(|| src_lang.clone());
+                if local_asr && source_language != tgt_lang && !original_text.trim().is_empty() {
+                    segment.translation_status = Some(if can_translate { "pending" } else { "unavailable" }.into());
+                }
+                if !is_running_final.load(Ordering::SeqCst) { break; }
                 segment.translated_text = Some(translated);
 
                 // 立即派发 asr-final 终态字幕事件，绝不因后台 LLM 问句判定与策略生成阻塞字幕上屏
@@ -204,6 +228,29 @@ impl LiveHearOrchestrator {
                     },
                 );
 
+                if local_asr && can_translate && !original_text.trim().is_empty() && source_language != tgt_lang {
+                    let svc = translation_svc.clone();
+                    let target = tgt_lang.clone();
+                    let text = original_text.clone();
+                    let segment_id = segment_id.clone();
+                    let app = app_final.clone();
+                    let slots = translation_slots.clone();
+                    translations.spawn(async move {
+                        let Ok(_permit) = slots.acquire().await else { return; };
+                        let result = translate_local(svc.as_ref(), &text, &source_language, &target).await;
+                        match result {
+                            Ok(translated) if !translated.trim().is_empty() => {
+                                let _ = app.emit("asr-translation", serde_json::json!({"segment_id": segment_id, "original": text, "translated": translated}));
+                            }
+                            _ => {
+                                let _ = app.emit("asr-translation", serde_json::json!({"segment_id": segment_id, "original": text, "translated": "", "error": true}));
+                                let _ = app.emit("asr-error", "字幕翻译失败或超时，已保留原文");
+                            }
+                        }
+                    });
+                }
+                while translations.try_join_next().is_some() {}
+
                 // 后台非阻塞并发执行 Jev 问句决策与应答策略生成，完成后通过独立事件通知前端
                 if auto_predict && should_evaluate_for_prediction(&original_text) {
                     let dec_svc = decision_svc.clone();
@@ -211,6 +258,7 @@ impl LiveHearOrchestrator {
                     let ctx = context.clone();
                     let app_sug = app_final.clone();
                     let orig_for_eval = original_text;
+                    let active = is_running_final.clone();
 
                     tokio::spawn(async move {
                         let dec_fut = dec_svc.evaluate(&orig_for_eval, &ctx);
@@ -226,7 +274,7 @@ impl LiveHearOrchestrator {
                                 )
                                 .await
                                 {
-                                    if !sugs.is_empty() {
+                                    if active.load(Ordering::SeqCst) && !sugs.is_empty() {
                                         let _ = app_sug.emit(
                                             "asr-suggestions",
                                             SuggestionsEventPayload {
@@ -242,11 +290,13 @@ impl LiveHearOrchestrator {
                     });
                 }
             }
+            while translations.join_next().await.is_some() {}
         });
 
         // 4. ASR 流监听派发主循环
         let app_stream = app.clone();
-        tokio::spawn(async move {
+        let draining_stream = self.draining.clone();
+        let stream_task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = stop_notify.notified() => {
@@ -276,7 +326,7 @@ impl LiveHearOrchestrator {
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 println!("ℹ️ [LiveHear] ASR 流接收通道已关闭");
-                                if is_running_clone.swap(false, Ordering::SeqCst) {
+                                if !draining_stream.load(Ordering::SeqCst) && is_running_clone.swap(false, Ordering::SeqCst) {
                                     let _ = app_stream.emit("asr-status", "stopped");
                                 }
                                 break;
@@ -287,6 +337,8 @@ impl LiveHearOrchestrator {
             }
         });
 
+        *self.stream_task.lock().await = Some(stream_task);
+        *self.final_task.lock().await = Some(final_task);
         Ok(())
     }
 
@@ -299,14 +351,55 @@ impl LiveHearOrchestrator {
         Ok(())
     }
 
-    pub async fn stop(&self) {
-        self.is_running.store(false, Ordering::SeqCst);
-        self.stop_notify.notify_waiters();
+    pub async fn stop(&self) -> bool {
+        let mut complete = true;
+        let should_drain = self.asr_service.drain_on_stop() && self.is_running.load(Ordering::SeqCst);
+        self.draining.store(should_drain, Ordering::SeqCst);
+        if !should_drain {
+            self.is_running.store(false, Ordering::SeqCst);
+            self.stop_notify.notify_waiters();
+        }
         {
             let mut cap = self.audio_capture.lock().await;
             cap.stop();
         }
-        let mut lock = self.audio_tx.lock().await;
-        *lock = None;
+        *self.audio_tx.lock().await = None;
+        let mut stream_task = self.stream_task.lock().await.take();
+        let mut final_task = self.final_task.lock().await.take();
+        if should_drain {
+            let drained = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+                if let Some(task) = stream_task.as_mut() { let _ = task.await; }
+                if let Some(task) = final_task.as_mut() { let _ = task.await; }
+            }).await;
+            if drained.is_err() {
+                complete = false;
+                self.is_running.store(false, Ordering::SeqCst);
+                self.stop_notify.notify_waiters();
+                if let Some(task) = stream_task { task.abort(); }
+                if let Some(task) = final_task { task.abort(); }
+            }
+        }
+        self.is_running.store(false, Ordering::SeqCst);
+        self.draining.store(false, Ordering::SeqCst);
+        complete
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct SlowTranslator;
+
+    #[async_trait::async_trait]
+    impl TranslationService for SlowTranslator {
+        async fn translate(&self, text: &str, source: &str, target: &str) -> Result<String, LiveHearError> {
+            tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+            Ok(format!("{source}:{target}:{text}"))
+        }
+    }
+
+    #[tokio::test]
+    async fn local_translation_allows_more_than_two_seconds() {
+        assert_eq!(translate_local(&SlowTranslator, "hello", "en", "zh").await.unwrap(), "en:zh:hello");
     }
 }

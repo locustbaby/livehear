@@ -9,6 +9,8 @@ use tokio::sync::{broadcast, mpsc};
 /// 实时 ASR 语音识别服务抽象 (Strategy Pattern)
 #[async_trait]
 pub trait ASRService: Send + Sync {
+    fn drain_on_stop(&self) -> bool { false }
+
     /// 建立流式识别管道：返回用于写入 PCM 音频的 Sender，以及订阅转录结果的 Receiver
     async fn start_stream(
         &self,

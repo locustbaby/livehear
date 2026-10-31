@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -217,8 +218,24 @@ impl Default for StorageConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AsrBackendConfig {
+    pub provider: String,
+    pub ollama_url: String,
+    pub ollama_model: String,
+}
+
+impl Default for AsrBackendConfig {
+    fn default() -> Self {
+        Self { provider: "soniox".into(), ollama_url: "http://127.0.0.1:11434".into(), ollama_model: "livehear-qwen3-asr:1.7b".into() }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub asr_backend: AsrBackendConfig,
     pub soniox: SonioxConfig,
     pub openrouter: OpenRouterConfig,
     pub jev: JevConfig,
@@ -258,16 +275,7 @@ impl AppConfig {
     fn read(path: &Path) -> Option<AppConfig> {
         let content = fs::read_to_string(path).ok()?;
         match serde_json::from_str::<AppConfig>(&content) {
-            Ok(mut c) => {
-                // 自动迁移旧版过短的 600ms/1000ms/1500ms 断句延迟配置，避免多人会议语句切碎与语义丢失
-                if c.soniox.max_endpoint_delay_ms < 1600 {
-                    c.soniox.max_endpoint_delay_ms = 2000;
-                }
-                if c.soniox.vad_threshold > 2.5 {
-                    c.soniox.vad_threshold = 1.8;
-                }
-                Some(c)
-            }
+            Ok(c) => Some(c),
             Err(e) => {
                 eprintln!("⚠️ [LiveHear] 配置文件解析失败 {}: {}", path.display(), e);
                 None
@@ -300,7 +308,22 @@ impl AppConfig {
         }
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| format!("序列化配置失败: {}", e))?;
-        fs::write(path, content).map_err(|e| format!("写入配置文件失败: {}", e))
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path).map_err(|e| format!("打开配置文件失败: {}", e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("设置配置文件权限失败: {}", e))?;
+        }
+        file.set_len(0).and_then(|_| file.write_all(content.as_bytes()))
+            .map_err(|e| format!("写入配置文件失败: {}", e))
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -310,4 +333,28 @@ impl AppConfig {
 
 fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_config_preserves_user_settings_and_restricts_permissions() {
+        let path = std::env::temp_dir().join(format!("livehear-config-test-{}-{}.json", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        let mut config = AppConfig::default();
+        config.soniox.max_endpoint_delay_ms = 1500;
+        config.soniox.vad_threshold = 3.0;
+        config.save_to(&path).unwrap();
+        let loaded = AppConfig::read(&path).unwrap();
+        assert_eq!(loaded.soniox.max_endpoint_delay_ms, 1500);
+        assert_eq!(loaded.soniox.vad_threshold, 3.0);
+        assert_eq!(loaded.asr_backend.provider, "soniox");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        fs::remove_file(path).unwrap();
+    }
 }
