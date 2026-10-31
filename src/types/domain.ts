@@ -1,6 +1,7 @@
 // 前端统一领域实体模型与配置规范 (与 Rust 后端 100% 对齐)
 
 export interface FullAppConfig {
+  asr_backend?: { provider: string; ollama_url: string; ollama_model: string };
   soniox: {
     api_key: string;
     ws_url: string;
@@ -59,6 +60,8 @@ export interface TranscriptSegment {
   speaker: Speaker;
   text: string;
   translated_text?: string;
+  asr_translation?: string;
+  translation_status?: 'pending' | 'unavailable';
   confirmed_text?: string;
   provisional_text?: string;
   confirmed_translated_text?: string;

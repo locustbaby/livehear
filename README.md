@@ -53,6 +53,14 @@
 - **Soniox API Key**：用于实时多语种语音识别与流式同传（[Soniox Console](https://console.soniox.com/)）
 - **OpenRouter / OpenAI 兼容 API Key**：用于双轨上下文纠偏、我方中文转外语口语、快捷输入秒译、划词精译、主动接话提词与 AI 会议纪要
 
+### 本地 Ollama 识别
+
+默认使用 Soniox；点击顶栏“识别：Soniox / Ollama”或在设置中选择引擎。切换时若正在同传，应用会重启识别流。Ollama 模式连接 `http://127.0.0.1:11434`，默认模型为 `livehear-qwen3-asr:1.7b`，可在配置文件的 `asr_backend` 中修改。
+
+本地模式优先在停顿处分段，连续讲话约 8 秒时强制切分，不提供逐词实时字幕、说话人分离或双向自动翻译；识别文本的翻译和 AI 整理仍依赖已配置的 AI 服务。识别跟不上时界面会提示音频丢失。停止或切换时会等待已接收的尾段处理；若处理超时会提示。
+
+通过国内 ModelScope 下载并校验模型：运行 `sh scripts/download-qwen3-asr-modelscope.sh`，然后将模型目录作为 `FROM` 导入 Ollama。首次使用前请先启动 Ollama。
+
 ### 本地开发与构建
 
 ```bash

@@ -8,6 +8,10 @@ pub struct TranscriptSegment {
     pub text: String,
     pub translated_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asr_translation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirmed_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisional_text: Option<String>,
@@ -39,6 +43,8 @@ impl TranscriptSegment {
             speaker,
             text,
             translated_text: None,
+            asr_translation: None,
+            translation_status: None,
             confirmed_text: None,
             provisional_text: None,
             confirmed_translated_text: None,
@@ -79,6 +85,8 @@ impl TranscriptSegment {
             speaker,
             text,
             translated_text: None,
+            asr_translation: None,
+            translation_status: None,
             confirmed_text: None,
             provisional_text: None,
             confirmed_translated_text: None,

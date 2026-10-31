@@ -7,7 +7,8 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::http::Request;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{header::AUTHORIZATION, HeaderValue};
 use tokio_tungstenite::tungstenite::Message;
 
 use std::sync::{Arc, Mutex};
@@ -229,7 +230,7 @@ impl SonioxLiveAdapter {
             api_key: None,
             model: self.config.model.clone(),
             audio_format: "pcm_s16le".to_string(),
-            sample_rate: self.config.sample_rate,
+            sample_rate: 16000,
             num_channels: 1,
             enable_speaker_diarization: self.config.enable_speaker_diarization,
             enable_endpoint_detection: self.config.enable_endpoint_detection,
@@ -588,7 +589,7 @@ impl UtteranceState {
 
     fn commit_current_utterance(
         &mut self,
-        reason: &str,
+        _reason: &str,
         event_tx: &broadcast::Sender<TranscriptSegment>,
     ) {
         let orig = if !self.pending_final_orig.trim().is_empty() {
@@ -603,6 +604,7 @@ impl UtteranceState {
             self.last_prov_trans.trim().to_string()
         };
 
+        let asr_translation = if trans.is_empty() { None } else { Some(trans.clone()) };
         let eff_lang = resolve_effective_language(self.detected_lang.as_deref(), &orig);
         let is_same = self.is_same_as_target(eff_lang.as_deref());
         if trans.is_empty() && is_same {
@@ -617,10 +619,7 @@ impl UtteranceState {
             };
             let turn_id = self.current_turn_id();
 
-            println!(
-                "✨ [Soniox {}] ({}) [{:?}] 原文: \"{}\" | 译文: \"{}\" (Speaker {})",
-                reason, turn_id, eff_lang, orig, trans, spk_id
-            );
+
 
             let mut final_seg = TranscriptSegment::new_final_with_id(
                 turn_id,
@@ -629,6 +628,7 @@ impl UtteranceState {
                 self.sentence_start_ms,
                 duration_ms,
             );
+            final_seg.asr_translation = asr_translation;
             final_seg.confirmed_text = Some(orig);
             final_seg.detected_language = eff_lang;
             final_seg.low_confidence_words = self.low_confidence_words.clone();
@@ -707,6 +707,8 @@ impl UtteranceState {
 
 #[async_trait]
 impl ASRService for SonioxLiveAdapter {
+    fn drain_on_stop(&self) -> bool { true }
+
     async fn test_connection(&self) -> Result<String, LiveHearError> {
         let api_key = self.config.api_key.trim();
         if api_key.is_empty() {
@@ -715,16 +717,11 @@ impl ASRService for SonioxLiveAdapter {
             ));
         }
 
-        let request = Request::builder()
-            .uri(&self.config.ws_url)
-            .header("Host", "stt-rt.soniox.com")
-            .header("Upgrade", "websocket")
-            .header("Connection", "Upgrade")
-            .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-            .header("Sec-WebSocket-Version", "13")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .body(())
-            .map_err(|e| LiveHearError::NetworkError(format!("构建握手请求失败: {}", e)))?;
+        let mut request = self.config.ws_url.as_str().into_client_request()
+            .map_err(|e| LiveHearError::NetworkError(format!("构建握手失败: {}", e)))?;
+        let auth = HeaderValue::from_str(&format!("Bearer {}", api_key))
+            .map_err(|e| LiveHearError::ConfigError(format!("无效 API Key: {}", e)))?;
+        request.headers_mut().insert(AUTHORIZATION, auth);
 
         let (mut ws_stream, _) = connect_async(request)
             .await
@@ -764,16 +761,11 @@ impl ASRService for SonioxLiveAdapter {
             ));
         }
 
-        let request = Request::builder()
-            .uri(&self.config.ws_url)
-            .header("Host", "stt-rt.soniox.com")
-            .header("Upgrade", "websocket")
-            .header("Connection", "Upgrade")
-            .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-            .header("Sec-WebSocket-Version", "13")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .body(())
+        let mut request = self.config.ws_url.as_str().into_client_request()
             .map_err(|e| LiveHearError::NetworkError(format!("构建握手失败: {}", e)))?;
+        let auth = HeaderValue::from_str(&format!("Bearer {}", api_key))
+            .map_err(|e| LiveHearError::ConfigError(format!("无效 API Key: {}", e)))?;
+        request.headers_mut().insert(AUTHORIZATION, auth);
 
         let (ws_stream, _) = connect_async(request)
             .await
@@ -785,7 +777,6 @@ impl ASRService for SonioxLiveAdapter {
         let init_json = serde_json::to_string(&init_payload)
             .map_err(|e| LiveHearError::SerializationError(e.to_string()))?;
 
-        println!("🚀 [Soniox Live] 发送初始化配置: {}", init_json);
 
         write
             .send(Message::Text(init_json.into()))
@@ -837,7 +828,6 @@ impl ASRService for SonioxLiveAdapter {
                 }
             }
             let _ = write.send(Message::Binary(vec![].into())).await;
-            let _ = write.close().await;
         });
 
         let enable_translation = self.config.enable_translation;
@@ -946,7 +936,7 @@ impl ASRService for SonioxLiveAdapter {
                         let resp = match serde_json::from_str::<SonioxStreamResponse>(&text) {
                             Ok(r) => r,
                             Err(e) => {
-                                eprintln!("⚠️ [Soniox 反序列化异常]: {} (原始报文: {})", e, text);
+                                eprintln!("⚠️ [Soniox 反序列化异常]: {}", e);
                                 continue;
                             }
                         };
@@ -962,7 +952,9 @@ impl ASRService for SonioxLiveAdapter {
                             continue;
                         }
 
+                        let finished = resp.finished.unwrap_or(false);
                         if resp.tokens.is_empty() {
+                            if finished { break; }
                             continue;
                         }
 
@@ -1018,12 +1010,14 @@ impl ASRService for SonioxLiveAdapter {
 
                             if remaining_tokens.is_empty() {
                                 state.emit_partial("", "", &event_tx);
+                                if finished { break; }
                                 continue;
                             }
                             process_token_batch(&mut state, remaining_tokens, &event_tx);
                         } else {
                             process_token_batch(&mut state, resp.tokens, &event_tx);
                         }
+                        if finished { break; }
                     }
                 }
             }

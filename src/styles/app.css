@@ -110,6 +110,7 @@ button, input, select, textarea, .no-drag {
 
 .hud-topbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   padding-top: 4px;
@@ -120,8 +121,10 @@ button, input, select, textarea, .no-drag {
 }
 .hud-status-group {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  min-width: 0;
+  gap: 6px;
   padding-left: 72px; /* 完美避让 macOS 原生红黄绿交通灯，呈现真正原生苹果视觉 */
 }
 [data-platform="windows"] .hud-status-group,
@@ -1901,3 +1904,6 @@ button, input, select, textarea, .no-drag {
 
 
 
+
+.raw-transcript { margin-top: 8px; color: var(--color-text-secondary, #b9c0ce); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.raw-transcript summary { cursor: pointer; }
