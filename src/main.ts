@@ -16,9 +16,13 @@ import {
 } from './components/hud';
 import type { FullAppConfig, QuickSpeakResult } from './types/domain';
 
+function hasNativeRuntime(): boolean {
+  return typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
+}
+
 // 安全调用 Tauri API
 async function tauriInvoke<T>(cmd: string, args?: Record<string, any>): Promise<T> {
-  if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
+  if (hasNativeRuntime()) {
     try {
       const core = await import('@tauri-apps/api/core');
       return await core.invoke<T>(cmd, args);
@@ -266,12 +270,17 @@ class LiveHearApp {
   private polishEpoch = 0;
   private polishToggleBusy = false;
   private asrToggleBusy = false;
+  private speakLanguageBusy = false;
+  private quickSpeakRequest = 0;
   private isStopping = false;
   private streamEpoch = 0;
   private lastPolishErrorAt = 0;
   private toastTimer: any = null;
   private toastRemoveTimer: any = null;
   private maxSubtitlesInMemory = 1000;
+  private archiveQueue: Promise<void> = Promise.resolve();
+  private archiveBacklog: SubtitleItem[] = [];
+  private archiveClearError: unknown = null;
   private translatingTurnIds = new Set<string>();
   private coalesceMap = new Map<
     string,
@@ -289,8 +298,30 @@ class LiveHearApp {
   private pushSubtitleWithCap(item: SubtitleItem) {
     this.hudState.subtitles.push(item);
     if (this.hudState.subtitles.length > this.maxSubtitlesInMemory) {
-      this.hudState.subtitles.splice(0, this.hudState.subtitles.length - this.maxSubtitlesInMemory);
+      const evicted = this.hudState.subtitles.splice(0, this.hudState.subtitles.length - this.maxSubtitlesInMemory);
+      this.archiveQueue = this.archiveQueue.then(async () => {
+        this.archiveBacklog.push(...evicted);
+        if (!hasNativeRuntime()) return;
+        try {
+          await tauriInvoke('archive_subtitles', { items: this.archiveBacklog });
+          this.archiveBacklog = [];
+        } catch {
+          this.showToast('⚠️ 字幕归档暂不可用，完整记录已暂存在内存中');
+        }
+      });
     }
+  }
+
+  private snapshotTranscript(): Promise<SubtitleItem[]> {
+    const active = this.hudState.subtitles.map(item => ({ ...item }));
+    const snapshot = this.archiveQueue.then(async () => {
+      if (this.archiveClearError) throw this.archiveClearError;
+      const archived = hasNativeRuntime() ? await tauriInvoke<SubtitleItem[]>('read_archived_subtitles') : [];
+      return [...archived, ...this.archiveBacklog, ...active];
+    });
+    // Reading participates in the same queue, so later evictions cannot duplicate the snapshot.
+    this.archiveQueue = snapshot.then(() => {}, () => {});
+    return snapshot;
   }
 
   constructor() {
@@ -379,7 +410,7 @@ class LiveHearApp {
   }
 
   private async initTauriListeners() {
-    if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
+    if (hasNativeRuntime()) {
       try {
         const { listen } = await import('@tauri-apps/api/event');
 
@@ -722,6 +753,7 @@ class LiveHearApp {
         // 7. 后台非阻塞智能应答建议事件监听（若该句是「我自己」说的，则忽略抢答弹窗）
         await listen('asr-suggestions', (event: any) => {
           const payload = event.payload;
+          if (payload?.speaker_id === this.hudState.mySpeakerId) return;
           if (payload?.segment_id && this.hudState.mySpeakerId) {
             const matchedIdx = this.findSubtitleIndexById(payload.segment_id);
             if (matchedIdx >= 0 && this.hudState.subtitles[matchedIdx].speakerId === this.hudState.mySpeakerId) {
@@ -1429,6 +1461,8 @@ class LiveHearApp {
           if (strictBox) {
             this.appConfig.soniox.language_hints_strict = strictBox.checked;
           }
+          this.quickSpeakRequest++;
+          this.hudState.quickSpeakCard = null;
           this.appConfig.soniox.speak_target_language = payload;
           this.streamManager.speakTargetLang = payload;
           const qlEl = document.getElementById('quickLangPopoverContainer');
@@ -1439,18 +1473,39 @@ class LiveHearApp {
         break;
 
       case 'cycleSpeakTargetLang': {
+        if (this.speakLanguageBusy || this.isStopping || this.asrToggleBusy) return;
+        this.speakLanguageBusy = true;
         const order = ['en', 'ja', 'th', 'ko', 'fr', 'de', 'es'];
         const cur = this.appConfig.soniox.speak_target_language || 'en';
         const next = order[(order.indexOf(cur) + 1) % order.length];
-        this.appConfig.soniox.speak_target_language = next;
-        this.streamManager.speakTargetLang = next;
-        this.refreshTopbarBadges();
-        this.refreshQuickSpeakDock();
-        this.streamManager.refreshDisplayMode(this.hudState.subtitles, this.hudState.displayMode);
+        const restart = this.hudState.isStreaming &&
+          this.appConfig.asr_backend?.provider !== 'ollama' &&
+          this.appConfig.soniox.translation_type === 'two_way';
         try {
-          await tauriInvoke('save_config', { newConfig: this.appConfig });
-        } catch {}
-        this.showToast(`🗣️ 我方发言/秒译目标外语已切换为: ${next.toUpperCase()}`);
+          const nextConfig = {
+            ...this.appConfig,
+            soniox: { ...this.appConfig.soniox, speak_target_language: next },
+          };
+          await tauriInvoke('save_config', { newConfig: nextConfig });
+          this.appConfig = nextConfig;
+          this.quickSpeakRequest++;
+          this.hudState.quickSpeakCard = null;
+          this.streamManager.speakTargetLang = next;
+          this.refreshTopbarBadges();
+          this.refreshQuickSpeakDock();
+          this.streamManager.refreshDisplayMode(this.hudState.subtitles, this.hudState.displayMode);
+          if (restart) {
+            await this.stopLiveStream(false);
+            await this.startLiveStream();
+          }
+          if (!restart || this.hudState.isStreaming) {
+            this.showToast(`🗣️ 我方发言/秒译目标外语已切换为: ${next.toUpperCase()}`);
+          }
+        } catch (err: any) {
+          this.showToast(`⚠️ 语言切换失败: ${err?.message || err}`);
+        } finally {
+          this.speakLanguageBusy = false;
+        }
         break;
       }
 
@@ -1510,6 +1565,7 @@ class LiveHearApp {
           inputEl?.focus();
           return;
         }
+        const requestId = ++this.quickSpeakRequest;
         const speakLang = this.appConfig.soniox.speak_target_language || 'en';
         this.hudState.quickSpeakCard = {
           input: text,
@@ -1517,7 +1573,7 @@ class LiveHearApp {
           targetLang: speakLang,
           loading: true,
         };
-        this.refreshQuickSpeakDock(text);
+        this.refreshQuickSpeakDock('');
 
         const recentHistory = this.hudState.subtitles
           .filter((s) => s.original || s.translated)
@@ -1536,6 +1592,7 @@ class LiveHearApp {
             targetLang: speakLang,
             recentHistory,
           });
+          if (requestId !== this.quickSpeakRequest) return;
           this.hudState.quickSpeakCard = {
             input: text,
             spoken: res.spoken,
@@ -1544,14 +1601,16 @@ class LiveHearApp {
             targetLang: res.target_lang || speakLang,
             loading: false,
           };
-          this.refreshQuickSpeakDock('');
+          this.refreshQuickSpeakDock();
           if (res.spoken) {
             navigator.clipboard.writeText(res.spoken);
             this.showToast(`✅ 已秒译为 ${(res.target_lang || speakLang).toUpperCase()} 并自动复制到剪贴板！`);
           }
         } catch (err: any) {
+          if (requestId !== this.quickSpeakRequest) return;
           this.hudState.quickSpeakCard = null;
-          this.refreshQuickSpeakDock(text);
+          const currentInput = document.getElementById('quickSpeakInput') as HTMLInputElement | null;
+          this.refreshQuickSpeakDock(currentInput?.value || text);
           this.showToast(`⚠️ 口语秒译失败: ${err?.message || err}`);
         }
         break;
@@ -1588,7 +1647,7 @@ class LiveHearApp {
           toneTag: '📌 重点笔记',
           lastUpdatedMs: nowMs,
         };
-        this.hudState.subtitles.push(noteItem);
+        this.pushSubtitleWithCap(noteItem);
         this.streamManager.finalizeLastCard(noteItem, this.hudState.displayMode);
         if (inputEl) inputEl.value = '';
         this.showToast('📌 已将笔记插入会议时间轴');
@@ -1596,6 +1655,7 @@ class LiveHearApp {
       }
 
       case 'closeQuickSpeakCard':
+        this.quickSpeakRequest++;
         this.hudState.quickSpeakCard = null;
         this.refreshQuickSpeakDock();
         break;
@@ -1765,7 +1825,7 @@ class LiveHearApp {
           toneTag: '📌 重点笔记',
           lastUpdatedMs: nowMs,
         };
-        this.hudState.subtitles.push(noteItem);
+        this.pushSubtitleWithCap(noteItem);
         this.streamManager.finalizeLastCard(noteItem, this.hudState.displayMode);
         if (inputEl) inputEl.value = '';
         this.showToast('📌 已将笔记插入会议时间轴（导出纪要时将自动合并）');
@@ -1803,6 +1863,19 @@ class LiveHearApp {
         break;
       }
       case 'clearSubtitles':
+        this.quickSpeakRequest++;
+        this.hudState.quickSpeakCard = null;
+        this.refreshQuickSpeakDock();
+        this.archiveQueue = this.archiveQueue.then(async () => {
+          this.archiveBacklog = [];
+          try {
+            if (hasNativeRuntime()) await tauriInvoke('clear_archived_subtitles');
+            this.archiveClearError = null;
+          } catch (error) {
+            this.archiveClearError = error;
+            this.showToast('⚠️ 归档清理失败，请重试清空后再导出');
+          }
+        });
         this.hudState.subtitles = [];
         this.hudState.suggestions = [];
         this.hudState.hasPredictSuggestion = false;
@@ -1902,6 +1975,10 @@ class LiveHearApp {
 
         const speakTargetLang = document.getElementById('cfgSonioxSpeakTargetLang') as HTMLSelectElement;
         if (speakTargetLang) {
+          if (speakTargetLang.value !== this.appConfig.soniox.speak_target_language) {
+            this.quickSpeakRequest++;
+            this.hudState.quickSpeakCard = null;
+          }
           this.appConfig.soniox.speak_target_language = speakTargetLang.value;
           this.streamManager.speakTargetLang = speakTargetLang.value;
         }
@@ -2066,22 +2143,27 @@ class LiveHearApp {
   private refreshQuickSpeakDock(preserveInput?: string) {
     const dockEl = document.getElementById('quickSpeakDockContainer');
     if (!dockEl) return;
-    const prevInput =
-      preserveInput !== undefined
-        ? preserveInput
-        : (document.getElementById('quickSpeakInput') as HTMLInputElement | null)?.value || '';
+    const previousInput = document.getElementById('quickSpeakInput') as HTMLInputElement | null;
+    const hadFocus = previousInput !== null && document.activeElement === previousInput;
+    const selectionStart = previousInput?.selectionStart ?? 0;
+    const selectionEnd = previousInput?.selectionEnd ?? 0;
+    const prevInput = preserveInput !== undefined ? preserveInput : previousInput?.value || '';
     dockEl.innerHTML = renderQuickSpeakDockHtml(this.hudState, this.appConfig);
     const nextInputEl = document.getElementById('quickSpeakInput') as HTMLInputElement | null;
-    if (nextInputEl && prevInput) {
+    if (nextInputEl) {
       nextInputEl.value = prevInput;
+      if (hadFocus) {
+        nextInputEl.focus();
+        nextInputEl.setSelectionRange(Math.min(selectionStart, prevInput.length), Math.min(selectionEnd, prevInput.length));
+      }
     }
   }
 
-  private async fetchAiExecutiveSummary(): Promise<string> {
-    if (!this.appConfig.openrouter?.api_key?.trim() || this.hudState.subtitles.length < 2) {
+  private async fetchAiExecutiveSummary(subtitles = this.hudState.subtitles): Promise<string> {
+    if (!this.appConfig.openrouter?.api_key?.trim() || subtitles.length < 2) {
       return '';
     }
-    const rawLines = this.hudState.subtitles
+    const rawLines = subtitles
       .slice(-120)
       .map((s) => {
         const o = (s.original || '').trim();
@@ -2102,13 +2184,13 @@ class LiveHearApp {
     }
   }
 
-  private generateTranscriptText(aiSummary = ''): string {
+  private generateTranscriptText(aiSummary = '', subtitles = this.hudState.subtitles): string {
     const now = new Date();
     const dateStr = now.toLocaleDateString();
     const timeStr = now.toLocaleTimeString();
 
     const distinctSpeakers = Array.from(
-      new Set(this.hudState.subtitles.map((s) => s.speaker))
+      new Set(subtitles.map((s) => s.speaker))
     ).join(', ');
 
     let lines: string[] = [];
@@ -2126,7 +2208,7 @@ class LiveHearApp {
     }
 
     lines.push('【逐字记录与双语同传】\n');
-    for (const item of this.hudState.subtitles) {
+    for (const item of subtitles) {
       const orig = (item.original || '').trim();
       const trans = item.translationStatus ? '' : (item.translated || '').trim();
       const lang = item.detectedLanguage ? item.detectedLanguage.toUpperCase() : '';
@@ -2156,13 +2238,13 @@ class LiveHearApp {
     return lines.join('\n');
   }
 
-  private generateTranscriptMarkdown(aiSummary = ''): string {
+  private generateTranscriptMarkdown(aiSummary = '', subtitles = this.hudState.subtitles): string {
     const now = new Date();
     const dateStr = now.toLocaleDateString();
     const timeStr = now.toLocaleTimeString();
 
     const distinctSpeakers = Array.from(
-      new Set(this.hudState.subtitles.map((s) => s.speaker))
+      new Set(subtitles.map((s) => s.speaker))
     ).join(', ');
 
     let md = `# LiveHear 会议速记与同传纪要\n\n`;
@@ -2179,7 +2261,7 @@ class LiveHearApp {
     md += `| 时间 | 发言人 | 语种 | 显示原文 | 显示译文 | 原始识别 | 原始译文 | AI 整理原文 | AI 整理译文 |\n`;
     md += `| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n`;
 
-    for (const item of this.hudState.subtitles) {
+    for (const item of subtitles) {
       const orig = (item.original || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
       const trans = (item.translationStatus ? '' : (item.translated || '')).replace(/\|/g, '\\|').replace(/\n/g, ' ');
       const lang = item.detectedLanguage ? item.detectedLanguage.toUpperCase() : '-';
@@ -2209,10 +2291,17 @@ class LiveHearApp {
     const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
     const filename = `Meeting_${ts}.${fileFormat}`;
 
-    const aiSummary = await this.fetchAiExecutiveSummary();
+    let subtitles: SubtitleItem[];
+    try {
+      subtitles = await this.snapshotTranscript();
+    } catch (error) {
+      this.showToast(`⚠️ 无法读取完整会议记录，导出已取消: ${error}`);
+      return;
+    }
+    const aiSummary = await this.fetchAiExecutiveSummary(subtitles);
     const content = fileFormat === 'md'
-      ? this.generateTranscriptMarkdown(aiSummary)
-      : this.generateTranscriptText(aiSummary);
+      ? this.generateTranscriptMarkdown(aiSummary, subtitles)
+      : this.generateTranscriptText(aiSummary, subtitles);
 
     try {
       const savedPath = await tauriInvoke<string>('save_meeting_transcript', {
@@ -2245,10 +2334,17 @@ class LiveHearApp {
     const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
     const filename = `Meeting_${ts}.${fileFormat}`;
 
-    const aiSummary = await this.fetchAiExecutiveSummary();
+    let subtitles: SubtitleItem[];
+    try {
+      subtitles = await this.snapshotTranscript();
+    } catch (error) {
+      this.showToast(`⚠️ 无法读取完整会议记录，导出已取消: ${error}`);
+      return;
+    }
+    const aiSummary = await this.fetchAiExecutiveSummary(subtitles);
     const content = fileFormat === 'md'
-      ? this.generateTranscriptMarkdown(aiSummary)
-      : this.generateTranscriptText(aiSummary);
+      ? this.generateTranscriptMarkdown(aiSummary, subtitles)
+      : this.generateTranscriptText(aiSummary, subtitles);
 
     try {
       const savedPath = await tauriInvoke<string>('save_meeting_transcript', {
