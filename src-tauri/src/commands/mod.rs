@@ -6,10 +6,12 @@ use crate::services::{ASRService, DecisionGateService, PredictService, Translati
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
+use tauri_plugin_opener::OpenerExt;
 use tokio::sync::RwLock;
 
 pub struct AppContainer {
     pub config: RwLock<AppConfig>,
+    pub transcript_archive: tokio::sync::Mutex<crate::transcript_archive::TranscriptArchive>,
     pub orchestrator: RwLock<Option<Arc<LiveHearOrchestrator>>>,
 }
 
@@ -18,6 +20,28 @@ pub struct QuickPredictResult {
     pub is_question: bool,
     pub intent: String,
     pub suggestions: Vec<ReplySuggestion>,
+}
+
+#[tauri::command]
+pub async fn archive_subtitles(
+    items: Vec<serde_json::Value>,
+    container: State<'_, Arc<AppContainer>>,
+) -> Result<(), String> {
+    container.transcript_archive.lock().await.append(&items)
+}
+
+#[tauri::command]
+pub async fn read_archived_subtitles(
+    container: State<'_, Arc<AppContainer>>,
+) -> Result<Vec<serde_json::Value>, String> {
+    container.transcript_archive.lock().await.read()
+}
+
+#[tauri::command]
+pub async fn clear_archived_subtitles(
+    container: State<'_, Arc<AppContainer>>,
+) -> Result<(), String> {
+    container.transcript_archive.lock().await.clear()
 }
 
 #[tauri::command]
@@ -78,7 +102,11 @@ pub async fn evaluate_and_predict(
 ) -> Result<QuickPredictResult, String> {
     let (openrouter_cfg, jev_cfg, meeting_ctx) = {
         let conf = container.config.read().await;
-        (conf.openrouter.clone(), conf.jev.clone(), conf.meeting.context.clone())
+        (
+            conf.openrouter.clone(),
+            conf.jev.clone(),
+            conf.meeting.context.clone(),
+        )
     };
 
     let jev_adapter = crate::services::ai::JevAdapter::new(jev_cfg, openrouter_cfg.api_key.clone());
@@ -111,8 +139,10 @@ pub async fn start_soniox_live(
     container: State<'_, Arc<AppContainer>>,
 ) -> Result<(), String> {
     let mut orchestrator_slot = container.orchestrator.write().await;
-    if let Some(old_orch) = orchestrator_slot.take() {
-        if !old_orch.stop().await { return Err("本地识别收尾超时，部分字幕可能未完成".into()); }
+    if let Some(old_orch) = orchestrator_slot.take()
+        && !old_orch.stop().await
+    {
+        return Err("本地识别收尾超时，部分字幕可能未完成".into());
     }
 
     let conf = {
@@ -121,32 +151,29 @@ pub async fn start_soniox_live(
     };
 
     let asr: Arc<dyn ASRService> = match conf.asr_backend.provider.as_str() {
-        "soniox" => Arc::new(SonioxLiveAdapter::new(conf.soniox.clone(), Some(app.clone()))
-            .with_meeting_context(conf.meeting.context.clone())),
-        "ollama" => Arc::new(crate::services::asr::ollama::OllamaAsr::new(conf.asr_backend.clone(), app.clone())),
+        "soniox" => Arc::new(
+            SonioxLiveAdapter::new(conf.soniox.clone(), Some(app.clone()))
+                .with_meeting_context(conf.meeting.context.clone()),
+        ),
+        "ollama" => Arc::new(crate::services::asr::ollama::OllamaAsr::new(
+            conf.asr_backend.clone(),
+            app.clone(),
+        )),
         other => return Err(format!("未知识别引擎: {}", other)),
     };
-    let translator = Arc::new(crate::services::ai::OpenRouterAdapter::new(conf.openrouter.clone()));
+    let translator = Arc::new(crate::services::ai::OpenRouterAdapter::new(
+        conf.openrouter.clone(),
+    ));
     let decision = Arc::new(crate::services::ai::JevAdapter::new(
         conf.jev.clone(),
         conf.openrouter.api_key.clone(),
     ));
-    let predictor = Arc::new(crate::services::ai::OpenRouterAdapter::new(conf.openrouter.clone()));
+    let predictor = Arc::new(crate::services::ai::OpenRouterAdapter::new(
+        conf.openrouter.clone(),
+    ));
 
     let orchestrator = Arc::new(LiveHearOrchestrator::new(
-        asr,
-        translator,
-        decision,
-        predictor,
-        conf.meeting.context,
-        conf.meeting.auto_predict,
-        conf.soniox.language_a,
-        conf.soniox.target_language,
-        conf.asr_backend.provider == "ollama",
-        !conf.openrouter.api_key.trim().is_empty(),
-        conf.soniox.enable_vad,
-        conf.soniox.vad_threshold,
-        conf.soniox.input_device,
+        asr, translator, decision, predictor, conf,
     ));
 
     orchestrator.start(app).await.map_err(|e| e.to_string())?;
@@ -162,7 +189,9 @@ pub async fn stop_soniox_live(container: State<'_, Arc<AppContainer>>) -> Result
     if let Some(orch) = lock.as_ref() {
         let complete = orch.stop().await;
         *lock = None;
-        if !complete { return Err("本地识别收尾超时，部分字幕可能未完成".into()); }
+        if !complete {
+            return Err("本地识别收尾超时，部分字幕可能未完成".into());
+        }
         return Ok(());
     }
     Ok(())
@@ -198,8 +227,15 @@ pub async fn simulate_test_speech(
 
     tokio::spawn(async move {
         if let Ok(wav_data) = std::fs::read("/tmp/long_speech.wav") {
-            let pcm = if wav_data.len() > 44 { &wav_data[44..] } else { &wav_data[..] };
-            println!("🎙️ [模拟测试音频] 开始推送真实语音流 (共 {} 字节)...", pcm.len());
+            let pcm = if wav_data.len() > 44 {
+                &wav_data[44..]
+            } else {
+                &wav_data[..]
+            };
+            println!(
+                "🎙️ [模拟测试音频] 开始推送真实语音流 (共 {} 字节)...",
+                pcm.len()
+            );
             for chunk in pcm.chunks(3200) {
                 let _ = orch.push_audio(chunk.to_vec()).await;
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -229,46 +265,47 @@ pub async fn save_meeting_transcript(
 
     let resolved_dir = resolve_dir_path(&dir_str);
     if let Err(e) = std::fs::create_dir_all(&resolved_dir) {
-        return Err(format!("创建会议纪要目录失败 ({}): {}", resolved_dir.display(), e));
+        return Err(format!(
+            "创建会议纪要目录失败 ({}): {}",
+            resolved_dir.display(),
+            e
+        ));
     }
 
     let fname = filename.unwrap_or_else(|| {
         let now = chrono::Local::now();
-        format!("Meeting_{}.{}", now.format("%Y%m%d_%H%M%S"), conf.storage.file_format)
+        format!(
+            "Meeting_{}.{}",
+            now.format("%Y%m%d_%H%M%S"),
+            conf.storage.file_format
+        )
     });
 
     let target_file = resolved_dir.join(&fname);
     std::fs::write(&target_file, content.as_bytes())
         .map_err(|e| format!("写入文件失败 ({}): {}", target_file.display(), e))?;
 
-    println!("💾 [LiveHear] 会议纪要已成功保存至: {}", target_file.display());
+    println!(
+        "💾 [LiveHear] 会议纪要已成功保存至: {}",
+        target_file.display()
+    );
     Ok(target_file.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-pub async fn open_path_in_finder(path: String) -> Result<(), String> {
+pub async fn open_path_in_finder(app: AppHandle, path: String) -> Result<(), String> {
     let resolved = resolve_dir_path(&path);
     if !resolved.exists() {
         return Err(format!("路径不存在: {}", resolved.display()));
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        let is_dir = resolved.is_dir();
-        let mut cmd = std::process::Command::new("open");
-        if !is_dir {
-            cmd.arg("-R");
-        }
-        cmd.arg(&resolved);
-        cmd.spawn().map_err(|e| format!("无法打开路径: {}", e))?;
+    if resolved.is_dir() {
+        app.opener()
+            .open_path(resolved.to_string_lossy(), None::<&str>)
+    } else {
+        app.opener().reveal_item_in_dir(&resolved)
     }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = opener::open(&resolved);
-    }
-
-    Ok(())
+    .map_err(|e| format!("无法打开路径: {e}"))
 }
 
 #[tauri::command]
@@ -298,16 +335,16 @@ pub async fn polish_transcript(
 
     let adapter = crate::services::ai::OpenRouterAdapter::new(conf.openrouter);
     adapter
-        .polish_and_connect(
-            &original,
-            &draft,
-            recent_history.as_deref().unwrap_or(""),
-            &low_confidence_words.unwrap_or_default(),
-            &conf.meeting.context,
-            &conf.soniox.custom_terms,
-            target_lang.as_deref(),
+        .polish_and_connect(crate::services::ai::openrouter::PolishRequest {
+            original_chunk: &original,
+            draft_translation: &draft,
+            recent_history: recent_history.as_deref().unwrap_or(""),
+            low_confidence_words: &low_confidence_words.unwrap_or_default(),
+            meeting_context: &conf.meeting.context,
+            custom_terms: &conf.soniox.custom_terms,
+            target_lang: target_lang.as_deref(),
             is_speak_foreign,
-        )
+        })
         .await
         .map_err(|e| e.to_string())
 }
@@ -401,10 +438,7 @@ pub async fn list_audio_devices() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-pub async fn set_stealth_mode(
-    enabled: bool,
-    window: tauri::WebviewWindow,
-) -> Result<bool, String> {
+pub async fn set_stealth_mode(enabled: bool, window: tauri::WebviewWindow) -> Result<bool, String> {
     window
         .set_content_protected(enabled)
         .map_err(|e| format!("设置防截屏隐身模式失败: {}", e))?;
@@ -469,5 +503,3 @@ fn resolve_dir_path(path_str: &str) -> std::path::PathBuf {
     }
     std::path::PathBuf::from(trimmed)
 }
-
-

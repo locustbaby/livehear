@@ -1,9 +1,9 @@
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
 pub const VAD_FINALIZE_SIGNAL: u8 = 1;
@@ -87,7 +87,12 @@ struct AudioDspPipeline {
 }
 
 impl AudioDspPipeline {
-    fn new(in_sample_rate: f64, target_sample_rate: f64, enable_vad: bool, vad_threshold: f32) -> Self {
+    fn new(
+        in_sample_rate: f64,
+        target_sample_rate: f64,
+        enable_vad: bool,
+        vad_threshold: f32,
+    ) -> Self {
         Self {
             ratio: (in_sample_rate / target_sample_rate).max(1.0),
             phase: 0.0,
@@ -114,11 +119,7 @@ impl AudioDspPipeline {
 
     #[inline]
     fn soft_clip(x: f32) -> f32 {
-        if x.abs() <= 0.82 {
-            x
-        } else {
-            x.tanh()
-        }
+        if x.abs() <= 0.82 { x } else { x.tanh() }
     }
 
     fn push_mono_sample(
@@ -262,13 +263,17 @@ impl NativeAudioCapture {
                 host.input_devices().ok().and_then(|mut devs| {
                     devs.find(|d| {
                         d.description()
-                            .map(|desc| desc.name() == target_name || desc.name().contains(target_name))
+                            .map(|desc| {
+                                desc.name() == target_name || desc.name().contains(target_name)
+                            })
                             .unwrap_or(false)
                     })
                 })
             })
             .or_else(|| host.default_input_device())
-            .ok_or_else(|| "未检测到可用的系统音频输入设备，请检查麦克风或内录设备连接".to_string())?;
+            .ok_or_else(|| {
+                "未检测到可用的系统音频输入设备，请检查麦克风或内录设备连接".to_string()
+            })?;
 
         let device_name = device
             .description()
@@ -298,51 +303,52 @@ impl NativeAudioCapture {
         let stream_config: cpal::StreamConfig = default_config.into();
 
         let app_clone = app.clone();
-        let mut dsp = AudioDspPipeline::new(in_sample_rate, target_sample_rate, enable_vad, vad_threshold);
+        let mut dsp = AudioDspPipeline::new(
+            in_sample_rate,
+            target_sample_rate,
+            enable_vad,
+            vad_threshold,
+        );
 
         let stream = match sample_format {
-            cpal::SampleFormat::F32 => {
-                device.build_input_stream(
-                    stream_config,
-                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        if !is_running_clone.load(Ordering::Relaxed) {
-                            return;
-                        }
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                stream_config,
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    if !is_running_clone.load(Ordering::Relaxed) {
+                        return;
+                    }
 
-                        for frame in data.chunks(in_channels) {
-                            let mut sum = 0.0f32;
-                            for &s in frame {
-                                sum += s;
-                            }
-                            let mono = (sum / in_channels as f32).clamp(-1.0, 1.0);
-                            dsp.push_mono_sample(mono, &audio_tx, &app_clone);
+                    for frame in data.chunks(in_channels) {
+                        let mut sum = 0.0f32;
+                        for &s in frame {
+                            sum += s;
                         }
-                    },
-                    err_fn,
-                    None,
-                )
-            }
-            cpal::SampleFormat::I16 => {
-                device.build_input_stream(
-                    stream_config,
-                    move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                        if !is_running_clone.load(Ordering::Relaxed) {
-                            return;
-                        }
+                        let mono = (sum / in_channels as f32).clamp(-1.0, 1.0);
+                        dsp.push_mono_sample(mono, &audio_tx, &app_clone);
+                    }
+                },
+                err_fn,
+                None,
+            ),
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                stream_config,
+                move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                    if !is_running_clone.load(Ordering::Relaxed) {
+                        return;
+                    }
 
-                        for frame in data.chunks(in_channels) {
-                            let mut sum = 0i32;
-                            for &s in frame {
-                                sum += s as i32;
-                            }
-                            let mono = ((sum / in_channels as i32) as f32 / 32768.0).clamp(-1.0, 1.0);
-                            dsp.push_mono_sample(mono, &audio_tx, &app_clone);
+                    for frame in data.chunks(in_channels) {
+                        let mut sum = 0i32;
+                        for &s in frame {
+                            sum += s as i32;
                         }
-                    },
-                    err_fn,
-                    None,
-                )
-            }
+                        let mono = ((sum / in_channels as i32) as f32 / 32768.0).clamp(-1.0, 1.0);
+                        dsp.push_mono_sample(mono, &audio_tx, &app_clone);
+                    }
+                },
+                err_fn,
+                None,
+            ),
             _ => return Err("暂不支持该音频设备的采样格式，仅支持 F32 或 I16".to_string()),
         }
         .map_err(|e| format!("构建麦克风音频流失败: {}。请检查系统麦克风隐私授权。", e))?;
@@ -364,6 +370,42 @@ impl NativeAudioCapture {
         }
         if let Some(app) = self.app_handle.take() {
             let _ = app.emit("audio-level", serde_json::json!({ "volume": 0 }));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orchestrator::finish_audio_stream;
+    use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn closed_asr_releases_capture_and_sender_even_when_draining() {
+        for draining in [false, true] {
+            let capture_active = Arc::new(AtomicBool::new(true));
+            let capture = Mutex::new(NativeAudioCapture {
+                stream: None,
+                is_capturing: capture_active.clone(),
+                app_handle: None,
+            });
+            let (tx, mut rx) = mpsc::channel(1);
+            let sender = Mutex::new(Some(tx));
+            let running = AtomicBool::new(true);
+            let draining_flag = AtomicBool::new(draining);
+            assert_eq!(
+                finish_audio_stream(&capture, &sender, &running, &draining_flag).await,
+                !draining
+            );
+            assert!(!capture_active.load(Ordering::Relaxed));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(running.load(Ordering::SeqCst), draining);
+            assert!(!finish_audio_stream(&capture, &sender, &running, &draining_flag).await);
         }
     }
 }

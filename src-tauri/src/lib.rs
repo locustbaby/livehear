@@ -3,6 +3,7 @@ pub mod config;
 pub mod domain;
 pub mod orchestrator;
 pub mod services;
+mod transcript_archive;
 
 use commands::AppContainer;
 use config::AppConfig;
@@ -19,15 +20,22 @@ pub fn run() {
                 AppConfig::init_path(dir);
             }
             let initial_config = AppConfig::load();
-            println!("📁 [LiveHear] 配置文件: {}", AppConfig::config_path().display());
+            println!(
+                "📁 [LiveHear] 配置文件: {}",
+                AppConfig::config_path().display()
+            );
             app.manage(Arc::new(AppContainer {
                 config: RwLock::new(initial_config),
+                transcript_archive: tokio::sync::Mutex::new(Default::default()),
                 orchestrator: RwLock::new(None),
             }));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
+            commands::archive_subtitles,
+            commands::read_archived_subtitles,
+            commands::clear_archived_subtitles,
             commands::save_config,
             commands::test_soniox,
             commands::translate,
