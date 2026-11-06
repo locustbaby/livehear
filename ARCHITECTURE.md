@@ -145,7 +145,7 @@ livehear/
    - **rAF 帧合并 (`SubtitleStreamManager`)**：高频流式 `asr-partial` 事件通过 `requestAnimationFrame` 合批，同 ID 节点使用 `replaceWith` 配合 `animation: none` 就地零闪烁更新。
    - **三级容量封顶与尾部 $O(1)$ 检索**：
      - DOM 节点封顶：`cullOldNodes()` 严格限制 `#subtitlesStream` 内最多保留最新 `120` 个 `.stream-turn-block` 节点。
-     - 内存数组封顶：`pushSubtitleWithCap()` 限制 `hudState.subtitles` 最多保留 `1000` 条记录，`coalesceMap` 限制最多保留 `64` 条活跃合并绑定，`translatingTurnIds` 防重集合对同句并发请求去重。
+     - 实时缓存封顶：`pushSubtitleWithCap()` 限制 `hudState.subtitles` 最多保留 `1000` 条记录，移出的记录按顺序写入 Rust 管理的本地临时 JSONL 归档；写入失败时保留内存副本并提示。导出先取得归档与实时缓存的一致快照，等待 AI 摘要期间的新发言不会改变该快照。清空字幕同时清空归档，正常退出时删除临时文件。`coalesceMap` 限制最多保留 `64` 条活跃合并绑定，`translatingTurnIds` 防重集合对同句并发请求去重。
      - 尾部逆序查找：`findSubtitleIndexById()` 从数组末尾向前扫描，使流式 Partial/Final 帧的状态匹配保持 $O(1)$ 常数级耗时。
 
 ---

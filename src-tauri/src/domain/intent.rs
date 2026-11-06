@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 结构化会议意图枚举
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MeetingIntent {
     /// 进度核对 / 排期交付问询
     ProgressCheck,
@@ -14,13 +14,8 @@ pub enum MeetingIntent {
     /// 方案异议与折中探讨
     Objection,
     /// 一般性交谈 / 闲聊
+    #[default]
     GeneralDiscussion,
-}
-
-impl Default for MeetingIntent {
-    fn default() -> Self {
-        MeetingIntent::GeneralDiscussion
-    }
 }
 
 impl MeetingIntent {

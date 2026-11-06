@@ -4,8 +4,8 @@ use std::fs::File;
 use std::io::Read;
 use std::time::Duration;
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::http::Request;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -74,8 +74,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut wav_data = Vec::new();
     file.read_to_end(&mut wav_data)?;
 
-    let pcm_data = if wav_data.len() > 44 { &wav_data[44..] } else { &wav_data[..] };
-    println!("🎙️ 准备发送 8.5 秒真实语音 PCM 数据，总字节数: {}", pcm_data.len());
+    let pcm_data = if wav_data.len() > 44 {
+        &wav_data[44..]
+    } else {
+        &wav_data[..]
+    };
+    println!(
+        "🎙️ 准备发送 8.5 秒真实语音 PCM 数据，总字节数: {}",
+        pcm_data.len()
+    );
 
     for (i, chunk) in pcm_data.chunks(3200).enumerate() {
         write.send(Message::Binary(chunk.to_vec().into())).await?;

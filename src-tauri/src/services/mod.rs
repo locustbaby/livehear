@@ -9,12 +9,20 @@ use tokio::sync::{broadcast, mpsc};
 /// 实时 ASR 语音识别服务抽象 (Strategy Pattern)
 #[async_trait]
 pub trait ASRService: Send + Sync {
-    fn drain_on_stop(&self) -> bool { false }
+    fn drain_on_stop(&self) -> bool {
+        false
+    }
 
     /// 建立流式识别管道：返回用于写入 PCM 音频的 Sender，以及订阅转录结果的 Receiver
     async fn start_stream(
         &self,
-    ) -> Result<(mpsc::Sender<Vec<u8>>, broadcast::Receiver<TranscriptSegment>), LiveHearError>;
+    ) -> Result<
+        (
+            mpsc::Sender<Vec<u8>>,
+            broadcast::Receiver<TranscriptSegment>,
+        ),
+        LiveHearError,
+    >;
 
     /// 连通性握手测试
     async fn test_connection(&self) -> Result<String, LiveHearError>;
@@ -34,11 +42,7 @@ pub trait TranslationService: Send + Sync {
 /// Jev System 1 结构化决策门禁服务抽象 (Strategy Pattern)
 #[async_trait]
 pub trait DecisionGateService: Send + Sync {
-    async fn evaluate(
-        &self,
-        utterance: &str,
-        context: &str,
-    ) -> Result<JevDecision, LiveHearError>;
+    async fn evaluate(&self, utterance: &str, context: &str) -> Result<JevDecision, LiveHearError>;
 }
 
 /// 智能会议应答建议生成服务抽象 (Strategy Pattern)

@@ -1,15 +1,15 @@
 use crate::config::SonioxConfig;
 use crate::domain::{LiveHearError, Speaker, TranscriptSegment};
-use crate::services::audio_capture::VAD_FINALIZE_SIGNAL;
 use crate::services::ASRService;
+use crate::services::audio_capture::VAD_FINALIZE_SIGNAL;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::{header::AUTHORIZATION, HeaderValue};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{HeaderValue, header::AUTHORIZATION};
 
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
@@ -180,7 +180,8 @@ impl SonioxLiveAdapter {
             }
         });
 
-        if general.is_empty() && text.is_none() && terms.is_empty() && translation_terms.is_empty() {
+        if general.is_empty() && text.is_none() && terms.is_empty() && translation_terms.is_empty()
+        {
             None
         } else {
             Some(SonioxContextPayload {
@@ -343,9 +344,8 @@ fn ends_with_sentence_terminal(s: &str) -> bool {
     if trimmed.ends_with('?') || trimmed.ends_with('!') {
         return true;
     }
-    if trimmed.ends_with('.') {
+    if let Some(without_dot) = trimmed.strip_suffix('.') {
         // 避免 Mr. / Dr. / v1. / e.g. 等缩写被误判为句末
-        let without_dot = &trimmed[..trimmed.len() - 1];
         let last_word = without_dot.split_whitespace().last().unwrap_or("");
         let lower = last_word.to_ascii_lowercase();
         if matches!(
@@ -354,7 +354,11 @@ fn ends_with_sentence_terminal(s: &str) -> bool {
         ) {
             return false;
         }
-        if last_word.len() == 1 && last_word.chars().all(|c| c.is_ascii_alphabetic() || c.is_ascii_digit()) {
+        if last_word.len() == 1
+            && last_word
+                .chars()
+                .all(|c| c.is_ascii_alphabetic() || c.is_ascii_digit())
+        {
             return false;
         }
         return true;
@@ -372,9 +376,9 @@ fn ends_with_clause_break(s: &str) -> bool {
 }
 
 fn ends_with_dangling_connector(s: &str) -> bool {
-    let trimmed = s
-        .trim_end()
-        .trim_end_matches(|c: char| c.is_ascii_punctuation() || matches!(c, '，' | '、' | '；' | '。'));
+    let trimmed = s.trim_end().trim_end_matches(|c: char| {
+        c.is_ascii_punctuation() || matches!(c, '，' | '、' | '；' | '。')
+    });
     if trimmed.is_empty() {
         return false;
     }
@@ -485,7 +489,8 @@ fn append_smart_text(buf: &mut String, piece: &str) {
     let first_char = piece.chars().next().unwrap_or(' ');
     let need_space = !last_char.is_whitespace()
         && !first_char.is_whitespace()
-        && (last_char.is_ascii_alphanumeric() || matches!(last_char, '.' | ',' | '?' | '!' | ';' | ':'))
+        && (last_char.is_ascii_alphanumeric()
+            || matches!(last_char, '.' | ',' | '?' | '!' | ';' | ':'))
         && first_char.is_ascii_alphanumeric();
     if need_space {
         buf.push(' ');
@@ -497,7 +502,8 @@ fn is_long_enough_for_punct_split(orig: &str) -> bool {
     let trimmed = orig.trim();
     let char_count = trimmed.chars().count();
     let word_count = trimmed.split_whitespace().count();
-    let is_cjk = infer_text_language(trimmed) == Some("zh") || infer_text_language(trimmed) == Some("ja");
+    let is_cjk =
+        infer_text_language(trimmed) == Some("zh") || infer_text_language(trimmed) == Some("ja");
     if is_cjk {
         char_count >= 48
     } else {
@@ -509,7 +515,8 @@ fn is_long_enough_for_clause_split(orig: &str) -> bool {
     let trimmed = orig.trim();
     let char_count = trimmed.chars().count();
     let word_count = trimmed.split_whitespace().count();
-    let is_cjk = infer_text_language(trimmed) == Some("zh") || infer_text_language(trimmed) == Some("ja");
+    let is_cjk =
+        infer_text_language(trimmed) == Some("zh") || infer_text_language(trimmed) == Some("ja");
     if is_cjk {
         char_count >= 80
     } else {
@@ -569,7 +576,9 @@ impl UtteranceState {
     }
 
     fn effective_speaker_id(&self) -> u32 {
-        self.current_speaker_id.or(self.prov_speaker_id).unwrap_or(1)
+        self.current_speaker_id
+            .or(self.prov_speaker_id)
+            .unwrap_or(1)
     }
 
     fn has_final_content(&self) -> bool {
@@ -604,7 +613,11 @@ impl UtteranceState {
             self.last_prov_trans.trim().to_string()
         };
 
-        let asr_translation = if trans.is_empty() { None } else { Some(trans.clone()) };
+        let asr_translation = if trans.is_empty() {
+            None
+        } else {
+            Some(trans.clone())
+        };
         let eff_lang = resolve_effective_language(self.detected_lang.as_deref(), &orig);
         let is_same = self.is_same_as_target(eff_lang.as_deref());
         if trans.is_empty() && is_same {
@@ -618,8 +631,6 @@ impl UtteranceState {
                 _ => None,
             };
             let turn_id = self.current_turn_id();
-
-
 
             let mut final_seg = TranscriptSegment::new_final_with_id(
                 turn_id,
@@ -661,8 +672,12 @@ impl UtteranceState {
         let confirmed_orig = self.pending_final_orig.clone();
         let confirmed_trans = self.pending_final_trans.clone();
 
-        let full_orig = format!("{}{}", confirmed_orig, prov_orig).trim().to_string();
-        let full_trans = format!("{}{}", confirmed_trans, prov_trans).trim().to_string();
+        let full_orig = format!("{}{}", confirmed_orig, prov_orig)
+            .trim()
+            .to_string();
+        let full_trans = format!("{}{}", confirmed_trans, prov_trans)
+            .trim()
+            .to_string();
 
         if full_orig.is_empty() && full_trans.is_empty() {
             return;
@@ -707,7 +722,9 @@ impl UtteranceState {
 
 #[async_trait]
 impl ASRService for SonioxLiveAdapter {
-    fn drain_on_stop(&self) -> bool { true }
+    fn drain_on_stop(&self) -> bool {
+        true
+    }
 
     async fn test_connection(&self) -> Result<String, LiveHearError> {
         let api_key = self.config.api_key.trim();
@@ -717,7 +734,11 @@ impl ASRService for SonioxLiveAdapter {
             ));
         }
 
-        let mut request = self.config.ws_url.as_str().into_client_request()
+        let mut request = self
+            .config
+            .ws_url
+            .as_str()
+            .into_client_request()
             .map_err(|e| LiveHearError::NetworkError(format!("构建握手失败: {}", e)))?;
         let auth = HeaderValue::from_str(&format!("Bearer {}", api_key))
             .map_err(|e| LiveHearError::ConfigError(format!("无效 API Key: {}", e)))?;
@@ -739,21 +760,29 @@ impl ASRService for SonioxLiveAdapter {
         // 发送空音频帧触发握手校验
         let _ = ws_stream.send(Message::Binary(vec![].into())).await;
 
-        if let Some(Ok(Message::Text(resp_text))) = ws_stream.next().await {
-            if let Ok(resp) = serde_json::from_str::<SonioxStreamResponse>(&resp_text) {
-                if let Some(err) = resp.error_message {
-                    return Err(LiveHearError::NetworkError(format!("Soniox 错误: {}", err)));
-                }
-            }
+        if let Some(Ok(Message::Text(resp_text))) = ws_stream.next().await
+            && let Ok(resp) = serde_json::from_str::<SonioxStreamResponse>(&resp_text)
+            && let Some(err) = resp.error_message
+        {
+            return Err(LiveHearError::NetworkError(format!("Soniox 错误: {}", err)));
         }
 
         let _ = ws_stream.close(None).await;
-        Ok("Soniox WebSocket (stt-rt-v5 语义断句 + 说话人分离 + 实时流式同传) 连通成功！".to_string())
+        Ok(
+            "Soniox WebSocket (stt-rt-v5 语义断句 + 说话人分离 + 实时流式同传) 连通成功！"
+                .to_string(),
+        )
     }
 
     async fn start_stream(
         &self,
-    ) -> Result<(mpsc::Sender<Vec<u8>>, broadcast::Receiver<TranscriptSegment>), LiveHearError> {
+    ) -> Result<
+        (
+            mpsc::Sender<Vec<u8>>,
+            broadcast::Receiver<TranscriptSegment>,
+        ),
+        LiveHearError,
+    > {
         let api_key = self.config.api_key.trim();
         if api_key.is_empty() {
             return Err(LiveHearError::ConfigError(
@@ -761,22 +790,25 @@ impl ASRService for SonioxLiveAdapter {
             ));
         }
 
-        let mut request = self.config.ws_url.as_str().into_client_request()
+        let mut request = self
+            .config
+            .ws_url
+            .as_str()
+            .into_client_request()
             .map_err(|e| LiveHearError::NetworkError(format!("构建握手失败: {}", e)))?;
         let auth = HeaderValue::from_str(&format!("Bearer {}", api_key))
             .map_err(|e| LiveHearError::ConfigError(format!("无效 API Key: {}", e)))?;
         request.headers_mut().insert(AUTHORIZATION, auth);
 
-        let (ws_stream, _) = connect_async(request)
-            .await
-            .map_err(|e| LiveHearError::NetworkError(format!("连接 Soniox WebSocket 失败: {}", e)))?;
+        let (ws_stream, _) = connect_async(request).await.map_err(|e| {
+            LiveHearError::NetworkError(format!("连接 Soniox WebSocket 失败: {}", e))
+        })?;
 
         let (mut write, mut read) = ws_stream.split();
 
         let init_payload = self.build_start_payload();
         let init_json = serde_json::to_string(&init_payload)
             .map_err(|e| LiveHearError::SerializationError(e.to_string()))?;
-
 
         write
             .send(Message::Text(init_json.into()))
@@ -915,8 +947,8 @@ impl ASRService for SonioxLiveAdapter {
                             _ => continue,
                         };
 
-                        if last_latency_emit.elapsed() >= tokio::time::Duration::from_millis(1000) {
-                            if let Ok(l) = last_chunk_sent_read.lock() {
+                        if last_latency_emit.elapsed() >= tokio::time::Duration::from_millis(1000)
+                            && let Ok(l) = last_chunk_sent_read.lock() {
                                 let raw_elapsed = l.elapsed().as_millis() as u64;
                                 // 仅在近期有活跃推流时更新延迟测算，避免 VAD 静音期数值虚高
                                 if raw_elapsed <= 450 {
@@ -931,7 +963,6 @@ impl ASRService for SonioxLiveAdapter {
                                     }
                                 }
                             }
-                        }
 
                         let resp = match serde_json::from_str::<SonioxStreamResponse>(&text) {
                             Ok(r) => r,
@@ -1143,10 +1174,11 @@ fn process_token_batch(
                     }
                 }
             }
-        } else if !is_trans && !token.is_final {
-            if let Some(spk) = parse_speaker(token) {
-                state.prov_speaker_id = Some(spk);
-            }
+        } else if !is_trans
+            && !token.is_final
+            && let Some(spk) = parse_speaker(token)
+        {
+            state.prov_speaker_id = Some(spk);
         }
 
         if !is_trans {
@@ -1320,7 +1352,12 @@ mod tests {
         process_token_batch(
             &mut state,
             vec![
-                make_token("How is the release going?", true, Some("original"), Some("1")),
+                make_token(
+                    "How is the release going?",
+                    true,
+                    Some("original"),
+                    Some("1"),
+                ),
                 make_token("<end>", true, Some("original"), Some("1")),
                 make_token("发布进展如何？", false, Some("translation"), Some("1")),
             ],
@@ -1328,9 +1365,14 @@ mod tests {
         );
 
         assert!(state.endpoint_pending_since.is_some());
-        let partial_seg = rx.try_recv().expect("should emit partial while waiting for final trans");
+        let partial_seg = rx
+            .try_recv()
+            .expect("should emit partial while waiting for final trans");
         assert!(!partial_seg.is_final);
-        assert_eq!(partial_seg.translated_text.as_deref(), Some("发布进展如何？"));
+        assert_eq!(
+            partial_seg.translated_text.as_deref(),
+            Some("发布进展如何？")
+        );
 
         // Frame 2: 下一帧终态译文抵达，同时下一句新发言开始
         let frame2 = vec![
@@ -1341,7 +1383,9 @@ mod tests {
         let mut consumed_indices = vec![false; frame2.len()];
         for (idx, token) in frame2.iter().enumerate() {
             if token.translation_status.as_deref() == Some("translation") && token.is_final {
-                state.pending_final_trans.push_str(&strip_control_markers(&token.text));
+                state
+                    .pending_final_trans
+                    .push_str(&strip_control_markers(&token.text));
                 consumed_indices[idx] = true;
             }
         }
@@ -1353,7 +1397,9 @@ mod tests {
             .collect();
         process_token_batch(&mut state, remaining, &tx);
 
-        let final_seg = rx.try_recv().expect("should emit final segment for sentence 1");
+        let final_seg = rx
+            .try_recv()
+            .expect("should emit final segment for sentence 1");
         assert!(final_seg.is_final);
         assert_eq!(final_seg.text, "How is the release going?");
         assert_eq!(final_seg.translated_text.as_deref(), Some("发布进展如何？"));
@@ -1380,15 +1426,27 @@ mod tests {
         process_token_batch(
             &mut state,
             vec![
-                make_token("Because the API gateway ", true, Some("original"), Some("1")),
+                make_token(
+                    "Because the API gateway ",
+                    true,
+                    Some("original"),
+                    Some("1"),
+                ),
                 make_token("needs ", true, Some("original"), Some("2")),
-                make_token("to be rate limited before Friday release.", true, Some("original"), Some("1")),
+                make_token(
+                    "to be rate limited before Friday release.",
+                    true,
+                    Some("original"),
+                    Some("1"),
+                ),
                 make_token("<end>", true, Some("original"), Some("1")),
             ],
             &tx,
         );
 
-        let final_seg = rx.try_recv().expect("should emit single unbroken final sentence");
+        let final_seg = rx
+            .try_recv()
+            .expect("should emit single unbroken final sentence");
         assert!(final_seg.is_final);
         assert_eq!(
             final_seg.text,
@@ -1415,7 +1473,9 @@ mod tests {
 
         // 此时不应切成碎句，而是进入 incomplete_hold_since 保持窗，仅派发 partial 实时预览
         assert!(state.incomplete_hold_since.is_some());
-        let first_msg = rx.try_recv().expect("should only emit partial for short incomplete clause");
+        let first_msg = rx
+            .try_recv()
+            .expect("should only emit partial for short incomplete clause");
         assert!(!first_msg.is_final);
 
         // 第二阶段：说话人继续把整句话说完
@@ -1429,12 +1489,19 @@ mod tests {
                     Some("1"),
                 ),
                 make_token("<end>", true, Some("original"), Some("1")),
-                make_token("我们需要在生产发布前完成数据库迁移。", true, Some("translation"), Some("1")),
+                make_token(
+                    "我们需要在生产发布前完成数据库迁移。",
+                    true,
+                    Some("translation"),
+                    Some("1"),
+                ),
             ],
             &tx,
         );
 
-        let second_msg = rx.try_recv().expect("should emit merged complete final sentence");
+        let second_msg = rx
+            .try_recv()
+            .expect("should emit merged complete final sentence");
         assert!(second_msg.is_final);
         assert_eq!(
             second_msg.text,
@@ -1446,4 +1513,3 @@ mod tests {
         );
     }
 }
-

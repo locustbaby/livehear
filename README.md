@@ -74,6 +74,18 @@ pnpm tauri dev
 pnpm tauri build
 ```
 
+### 本地验证
+
+```bash
+pnpm test
+pnpm build
+cargo test --manifest-path src-tauri/Cargo.toml --locked
+cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+```
+
+回归测试不需要麦克风权限或真实 API Key；AI 解析测试通过本机回环 HTTP 服务模拟返回值。Windows 打包流水线也会执行这些测试与 Rust 检查。
+
 ### Windows 安装包构建 (GitHub Actions 云端流水线)
 由于 Tauri v2 依赖目标系统的原生 WebView（macOS `WKWebView` / Windows `WebView2`）及 MSVC 链接器，仓库已内置 [`.github/workflows/build-windows.yml`](file:///Users/sexy/Documents/GitHub/livehear/.github/workflows/build-windows.yml) 自动化流水线：
 - 在 GitHub Actions 页面点击 **Build Windows Installer -> Run workflow**（或推送 `v*` 标签），即可在 `windows-latest` 云端环境自动编译并产出 Windows `.exe` (NSIS) 与 `.msi` 安装包产物。

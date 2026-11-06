@@ -228,7 +228,11 @@ pub struct AsrBackendConfig {
 
 impl Default for AsrBackendConfig {
     fn default() -> Self {
-        Self { provider: "soniox".into(), ollama_url: "http://127.0.0.1:11434".into(), ollama_model: "livehear-qwen3-asr:1.7b".into() }
+        Self {
+            provider: "soniox".into(),
+            ollama_url: "http://127.0.0.1:11434".into(),
+            ollama_model: "livehear-qwen3-asr:1.7b".into(),
+        }
     }
 }
 
@@ -301,13 +305,13 @@ impl AppConfig {
 
     /// 保存配置到指定路径
     pub fn save_to(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                let _ = fs::create_dir_all(parent);
-            }
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            let _ = fs::create_dir_all(parent);
         }
-        let content = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("序列化配置失败: {}", e))?;
+        let content =
+            serde_json::to_string_pretty(self).map_err(|e| format!("序列化配置失败: {}", e))?;
         let mut options = fs::OpenOptions::new();
         options.write(true).create(true);
         #[cfg(unix)]
@@ -315,14 +319,17 @@ impl AppConfig {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(path).map_err(|e| format!("打开配置文件失败: {}", e))?;
+        let mut file = options
+            .open(path)
+            .map_err(|e| format!("打开配置文件失败: {}", e))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             file.set_permissions(fs::Permissions::from_mode(0o600))
                 .map_err(|e| format!("设置配置文件权限失败: {}", e))?;
         }
-        file.set_len(0).and_then(|_| file.write_all(content.as_bytes()))
+        file.set_len(0)
+            .and_then(|_| file.write_all(content.as_bytes()))
             .map_err(|e| format!("写入配置文件失败: {}", e))
     }
 
@@ -341,7 +348,11 @@ mod tests {
 
     #[test]
     fn saved_config_preserves_user_settings_and_restricts_permissions() {
-        let path = std::env::temp_dir().join(format!("livehear-config-test-{}-{}.json", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        let path = std::env::temp_dir().join(format!(
+            "livehear-config-test-{}-{}.json",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
         let mut config = AppConfig::default();
         config.soniox.max_endpoint_delay_ms = 1500;
         config.soniox.vad_threshold = 3.0;
@@ -353,7 +364,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         fs::remove_file(path).unwrap();
     }

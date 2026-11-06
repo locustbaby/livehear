@@ -54,13 +54,11 @@ impl JevAdapter {
 
 #[async_trait]
 impl DecisionGateService for JevAdapter {
-    async fn evaluate(
-        &self,
-        utterance: &str,
-        context: &str,
-    ) -> Result<JevDecision, LiveHearError> {
+    async fn evaluate(&self, utterance: &str, context: &str) -> Result<JevDecision, LiveHearError> {
         if !self.config.enabled {
-            let is_q = utterance.contains('?') || utterance.contains('？') || utterance.to_lowercase().contains("can you");
+            let is_q = utterance.contains('?')
+                || utterance.contains('？')
+                || utterance.to_lowercase().contains("can you");
             return Ok(JevDecision {
                 is_question: is_q,
                 confidence: if is_q { 0.9 } else { 0.1 },
@@ -102,7 +100,10 @@ impl DecisionGateService for JevAdapter {
             max_tokens: Some(120),
         };
 
-        let url = format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/chat/completions",
+            self.config.base_url.trim_end_matches('/')
+        );
         let res = self
             .client
             .post(&url)
@@ -112,10 +113,12 @@ impl DecisionGateService for JevAdapter {
             .await
             .map_err(|e| LiveHearError::NetworkError(e.to_string()))?;
 
-        if let Ok(data) = res.json::<ChatCompletionResponse>().await {
-            if let Some(choice) = data.choices.first() {
-                let raw_content = &choice.message.content;
-                let clean_json = if let (Some(start), Some(end)) = (raw_content.find('{'), raw_content.rfind('}')) {
+        if let Ok(data) = res.json::<ChatCompletionResponse>().await
+            && let Some(choice) = data.choices.first()
+        {
+            let raw_content = &choice.message.content;
+            let clean_json =
+                if let (Some(start), Some(end)) = (raw_content.find('{'), raw_content.rfind('}')) {
                     if start <= end {
                         &raw_content[start..=end]
                     } else {
@@ -125,26 +128,27 @@ impl DecisionGateService for JevAdapter {
                     raw_content.as_str()
                 };
 
-                if let Ok(raw) = serde_json::from_str::<RawJevOutput>(clean_json) {
-                    let intent = match raw.intent.as_deref() {
-                        Some("progress_check") => MeetingIntent::ProgressCheck,
-                        Some("technical_blocker") => MeetingIntent::TechnicalBlocker,
-                        Some("action_item") => MeetingIntent::ActionItemAssignment,
-                        Some("clarification") => MeetingIntent::Clarification,
-                        Some("objection") => MeetingIntent::Objection,
-                        _ => MeetingIntent::GeneralDiscussion,
-                    };
-                    return Ok(JevDecision {
-                        is_question: raw.is_question,
-                        confidence: raw.confidence.unwrap_or(0.9),
-                        intent,
-                    });
-                }
+            if let Ok(raw) = serde_json::from_str::<RawJevOutput>(clean_json) {
+                let intent = match raw.intent.as_deref() {
+                    Some("progress_check") => MeetingIntent::ProgressCheck,
+                    Some("technical_blocker") => MeetingIntent::TechnicalBlocker,
+                    Some("action_item") => MeetingIntent::ActionItemAssignment,
+                    Some("clarification") => MeetingIntent::Clarification,
+                    Some("objection") => MeetingIntent::Objection,
+                    _ => MeetingIntent::GeneralDiscussion,
+                };
+                return Ok(JevDecision {
+                    is_question: raw.is_question,
+                    confidence: raw.confidence.unwrap_or(0.9),
+                    intent,
+                });
             }
         }
 
         // 容错降级
-        let is_q = utterance.contains('?') || utterance.to_lowercase().contains("can we") || utterance.to_lowercase().contains("could we");
+        let is_q = utterance.contains('?')
+            || utterance.to_lowercase().contains("can we")
+            || utterance.to_lowercase().contains("could we");
         Ok(JevDecision {
             is_question: is_q,
             confidence: 0.8,

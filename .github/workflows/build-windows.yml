@@ -26,6 +26,8 @@ jobs:
 
       - name: Install Rust Stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
@@ -33,7 +35,19 @@ jobs:
           workspaces: './src-tauri -> target'
 
       - name: Install Frontend Dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Test Frontend State and Export
+        run: pnpm test
+
+      - name: Check Rust Formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Check Rust Lints
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+
+      - name: Test Rust Services
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
       - name: Build Tauri Windows App (.exe & .msi)
         run: pnpm tauri build
