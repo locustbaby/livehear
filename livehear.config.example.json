@@ -9,7 +9,7 @@
     "language_hints": ["en", "zh"],
     "language_hints_strict": true,
     "enable_translation": true,
-    "translation_type": "one_way",
+    "translation_type": "two_way",
     "target_language": "zh",
     "speak_target_language": "en",
     "language_a": "en",

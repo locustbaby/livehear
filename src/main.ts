@@ -214,7 +214,7 @@ class LiveHearApp {
       language_hints: ['en', 'zh'],
       language_hints_strict: true,
       enable_translation: true,
-      translation_type: 'one_way',
+      translation_type: 'two_way',
       target_language: 'zh',
       speak_target_language: 'en',
       language_a: 'en',
@@ -1038,6 +1038,10 @@ class LiveHearApp {
   }
 
   private async translateTurnToForeign(turnId: string, silent = false) {
+    if (silent && this.appConfig.asr_backend?.provider !== 'ollama' &&
+        this.appConfig.soniox.enable_translation !== false &&
+        (this.appConfig.soniox.target_language || 'zh') === 'zh' &&
+        this.appConfig.soniox.translation_type === 'two_way') return;
     if (this.translatingTurnIds.has(turnId)) return;
     const curIdx = this.findSubtitleIndexById(turnId);
     if (curIdx < 0) return;
@@ -1154,7 +1158,6 @@ class LiveHearApp {
       (item.detectedLanguage === 'zh' || detectTextLanguage(origTrimmed) === 'zh') &&
       cjkCount >= 2;
 
-    // 当「我自己」说中文时，无论是否开启普通润色，都立即将其翻译为我方目标外语 (如英语) 供开口照念
     if (isMe && isChinese) {
       this.translateTurnToForeign(item.id, true);
       return;

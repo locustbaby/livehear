@@ -456,7 +456,7 @@ export function renderSubtitleTurnHtml(
       isChineseSpeech
         ? `
       <button class="turn-speak-trans-action no-drag"
-              title="将这句中文翻译并润色为地道 ${speakUpper} 口语"
+              title="使用配置的 AI 翻译模型，将这句中文润色为地道 ${speakUpper} 口语"
               onclick="window.__livehear_action('translateTurnToForeign', '${escapeJs(item.id)}')">
         <span>🌐</span>
         <span>译为${speakUpper}</span>
@@ -906,11 +906,11 @@ export function renderQuickLangPopoverHtml(config: FullAppConfig): string {
         <div class="ql-mode-row">
           <button class="ql-mode-btn ${isOneWay ? 'active' : ''}"
                   onclick="window.__livehear_action('quickSetTransMode', 'one_way')">
-            🌐 单向听会 + 智能辅助我 Speak (推荐)
+            🌐 单向听会 + 智能辅助我 Speak
           </button>
           <button class="ql-mode-btn ${!isOneWay ? 'active' : ''}"
                   onclick="window.__livehear_action('quickSetTransMode', 'two_way')">
-            🔄 Soniox 全程双向互译
+            🔄 Soniox 全程双向互译（默认）
           </button>
         </div>
         <div class="ql-target-chips">
@@ -1047,11 +1047,11 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
             <div class="radio-pill-group">
               <label class="radio-pill ${isOneWay ? 'active' : ''}">
                 <input type="radio" name="cfgTranslationType" value="one_way" ${isOneWay ? 'checked' : ''} />
-                <span>🌐 涉外会议单向同传 (推荐)</span>
+                <span>🌐 涉外会议单向同传</span>
               </label>
               <label class="radio-pill ${!isOneWay ? 'active' : ''}">
                 <input type="radio" name="cfgTranslationType" value="two_way" ${!isOneWay ? 'checked' : ''} />
-                <span>🔄 跨国双向对话互译 (中英互译)</span>
+                <span>🔄 Soniox 双向互译（默认）</span>
               </label>
             </div>
             <div class="setting-tip">

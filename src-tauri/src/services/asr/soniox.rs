@@ -1292,6 +1292,16 @@ fn process_token_batch(
 mod tests {
     use super::*;
 
+    #[test]
+    fn default_stream_requests_native_english_chinese_translation() {
+        let adapter = SonioxLiveAdapter::new(SonioxConfig::default(), None);
+        let translation = adapter.build_start_payload().translation.unwrap();
+        assert_eq!(translation.translation_type, "two_way");
+        assert_eq!(translation.language_a.as_deref(), Some("en"));
+        assert_eq!(translation.language_b.as_deref(), Some("zh"));
+        assert!(translation.target_language.is_none());
+    }
+
     fn make_token(
         text: &str,
         is_final: bool,

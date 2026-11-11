@@ -206,3 +206,27 @@ test('browser preview keeps a complete export snapshot without native storage', 
   h.app.pushSubtitleWithCap(record(2000));
   assert.equal((await h.app.snapshotTranscript()).length, 1);
 });
+
+test('binding my speaker leaves live Chinese translation to Soniox and manual EN still works', async () => {
+  const h = harness();
+  h.app.appConfig.openrouter.api_key = 'test';
+  h.app.appConfig.openrouter.enable_polish = false;
+  await h.init();
+  const final = (id, text, translated) => h.listeners.get('asr-final')({payload: {segment: {
+    id, text, translated_text: translated, asr_translation: translated, detected_language: 'zh',
+    speaker: {id: 2, display_name: 'Speaker 2'},
+  }}});
+  final('first', '你好', '');
+  await h.app.handleAction('toggleMySpeaker', 2);
+  final('second', '我们明天开会', "We'll meet tomorrow.");
+  assert.ok(h.app.hudState.subtitles.at(-1).translated.includes("We'll meet tomorrow."));
+  assert.equal(h.calls.filter(call => call.cmd === 'polish_transcript').length, 0);
+  h.overrides.set('polish_transcript', async () => ({translated: "Hello, we'll meet tomorrow."}));
+  h.app.streamManager.updateLastFinalTurn = () => {};
+  await h.app.handleAction('translateTurnToForeign', h.app.hudState.subtitles.at(-1).id);
+  const requests = h.calls.filter(call => call.cmd === 'polish_transcript');
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].args.speakMode, true);
+  assert.equal(requests[0].args.targetLang, 'en');
+  assert.equal(h.clipboard.at(-1), "Hello, we'll meet tomorrow.");
+});

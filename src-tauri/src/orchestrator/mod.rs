@@ -85,6 +85,7 @@ pub struct LiveHearOrchestrator {
     source_language: String,
     target_language: String,
     local_asr: bool,
+    native_speak_language: Option<String>,
     can_translate: bool,
     enable_vad: bool,
     vad_threshold: f32,
@@ -117,6 +118,9 @@ impl LiveHearOrchestrator {
             source_language: config.soniox.language_a,
             target_language: config.soniox.target_language,
             local_asr: config.asr_backend.provider == "ollama",
+            native_speak_language: (config.soniox.enable_translation
+                && config.soniox.translation_type == "two_way")
+                .then_some(config.soniox.speak_target_language),
             can_translate: !config.openrouter.api_key.trim().is_empty(),
             enable_vad: config.soniox.enable_vad,
             vad_threshold: config.soniox.vad_threshold,
@@ -188,6 +192,7 @@ impl LiveHearOrchestrator {
         let tgt_lang = self.target_language.clone();
         let local_asr = self.local_asr;
         let can_translate = self.can_translate;
+        let native_speak_language = self.native_speak_language.clone();
         let seq_counter_final = self.sequence_counter.clone();
         let seq_counter_stream = self.sequence_counter.clone();
 
@@ -202,41 +207,34 @@ impl LiveHearOrchestrator {
             while let Some(mut segment) = final_rx.recv().await {
                 let original_text = segment.text.clone();
 
+                let source_language = segment
+                    .detected_language
+                    .clone()
+                    .unwrap_or_else(|| src_lang.clone());
                 let translated = if local_asr {
                     original_text.clone()
-                } else if let Some(soniox_trans) = segment.translated_text.take() {
-                    if !soniox_trans.trim().is_empty() {
-                        soniox_trans
-                    } else if !original_text.trim().is_empty() {
-                        let source = segment.detected_language.as_deref().unwrap_or(&src_lang);
-                        tokio::time::timeout(
-                            tokio::time::Duration::from_secs(2),
-                            translation_svc.translate(&original_text, source, &tgt_lang),
-                        )
-                        .await
-                        .ok()
-                        .and_then(Result::ok)
-                        .unwrap_or_else(|| original_text.clone())
-                    } else {
-                        String::new()
-                    }
-                } else if !original_text.trim().is_empty() {
-                    let source = segment.detected_language.as_deref().unwrap_or(&src_lang);
+                } else if let Some(native) = segment
+                    .translated_text
+                    .take()
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    native
+                } else if original_text.trim().is_empty()
+                    || native_speak_language.as_ref().is_some_and(|speak| {
+                        source_language == *speak || source_language == tgt_lang
+                    })
+                {
+                    original_text.clone()
+                } else {
                     tokio::time::timeout(
                         tokio::time::Duration::from_secs(2),
-                        translation_svc.translate(&original_text, source, &tgt_lang),
+                        translation_svc.translate(&original_text, &source_language, &tgt_lang),
                     )
                     .await
                     .ok()
                     .and_then(Result::ok)
                     .unwrap_or_else(|| original_text.clone())
-                } else {
-                    String::new()
                 };
-                let source_language = segment
-                    .detected_language
-                    .clone()
-                    .unwrap_or_else(|| src_lang.clone());
                 if local_asr && source_language != tgt_lang && !original_text.trim().is_empty() {
                     segment.translation_status = Some(
                         if can_translate {

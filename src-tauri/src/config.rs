@@ -62,7 +62,7 @@ fn default_enable_translation() -> bool {
 }
 
 fn default_translation_type() -> String {
-    "one_way".to_string()
+    "two_way".to_string()
 }
 
 fn default_target_language() -> String {
@@ -109,7 +109,7 @@ impl Default for SonioxConfig {
             language_hints: vec!["en".to_string(), "zh".to_string()],
             language_hints_strict: true,
             enable_translation: true,
-            translation_type: "one_way".to_string(),
+            translation_type: default_translation_type(),
             target_language: "zh".to_string(),
             speak_target_language: "en".to_string(),
             language_a: "en".to_string(),
