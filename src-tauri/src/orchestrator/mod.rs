@@ -211,31 +211,23 @@ impl LiveHearOrchestrator {
                     .detected_language
                     .clone()
                     .unwrap_or_else(|| src_lang.clone());
-                let translated = if local_asr {
-                    original_text.clone()
-                } else if let Some(native) = segment
-                    .translated_text
-                    .take()
-                    .filter(|text| !text.trim().is_empty())
-                {
-                    native
-                } else if original_text.trim().is_empty()
-                    || native_speak_language.as_ref().is_some_and(|speak| {
-                        source_language == *speak || source_language == tgt_lang
-                    })
-                {
-                    original_text.clone()
+                let native_translation = if local_asr {
+                    None
                 } else {
-                    tokio::time::timeout(
-                        tokio::time::Duration::from_secs(2),
-                        translation_svc.translate(&original_text, &source_language, &tgt_lang),
-                    )
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .unwrap_or_else(|| original_text.clone())
+                    segment
+                        .translated_text
+                        .take()
+                        .filter(|text| !text.trim().is_empty())
                 };
-                if local_asr && source_language != tgt_lang && !original_text.trim().is_empty() {
+                let has_native_translation = native_translation.is_some();
+                let is_speak_covered = native_speak_language
+                    .as_ref()
+                    .is_some_and(|speak| source_language == *speak);
+                let needs_async_translation = !original_text.trim().is_empty()
+                    && source_language != tgt_lang
+                    && (local_asr || (!has_native_translation && !is_speak_covered));
+                let translated = native_translation.unwrap_or_else(|| original_text.clone());
+                if needs_async_translation {
                     segment.translation_status = Some(
                         if can_translate {
                             "pending"
@@ -261,11 +253,7 @@ impl LiveHearOrchestrator {
                     },
                 );
 
-                if local_asr
-                    && can_translate
-                    && !original_text.trim().is_empty()
-                    && source_language != tgt_lang
-                {
+                if needs_async_translation && can_translate {
                     let svc = translation_svc.clone();
                     let target = tgt_lang.clone();
                     let text = original_text.clone();
@@ -273,14 +261,23 @@ impl LiveHearOrchestrator {
                     let app = app_final.clone();
                     let slots = translation_slots.clone();
                     translations.spawn(async move {
-                        let Ok(_permit) = slots.acquire().await else { return; };
-                        let result = translate_local(svc.as_ref(), &text, &source_language, &target).await;
+                        let Ok(_permit) = slots.acquire().await else {
+                            return;
+                        };
+                        let result =
+                            translate_local(svc.as_ref(), &text, &source_language, &target).await;
                         match result {
                             Ok(translated) if !translated.trim().is_empty() => {
-                                let _ = app.emit("asr-translation", serde_json::json!({"segment_id": segment_id, "original": text, "translated": translated}));
+                                let _ = app.emit(
+                                    "asr-translation",
+                                    serde_json::json!({"segment_id": segment_id, "original": text, "translated": translated}),
+                                );
                             }
                             _ => {
-                                let _ = app.emit("asr-translation", serde_json::json!({"segment_id": segment_id, "original": text, "translated": "", "error": true}));
+                                let _ = app.emit(
+                                    "asr-translation",
+                                    serde_json::json!({"segment_id": segment_id, "original": text, "translated": "", "error": true}),
+                                );
                                 let _ = app.emit("asr-error", "字幕翻译失败或超时，已保留原文");
                             }
                         }

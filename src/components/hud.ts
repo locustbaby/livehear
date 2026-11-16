@@ -186,12 +186,17 @@ export function renderHudView(
             <span>静音降费</span>
           </div>
 
+          <span class="latency-badge"
+                id="sonioxLatencyBadge"
+                title="Soniox 实时流端到端响应延迟"
+                style="${state.isStreaming && state.sonioxLatencyMs > 0 && config?.asr_backend?.provider !== 'ollama' ? '' : 'display:none'}">⚡ ${state.sonioxLatencyMs}ms</span>
+
           <span id="topbarMySpeakerSlot">
             ${
               state.mySpeakerId
                 ? `
               <button class="my-speaker-top-pill no-drag"
-                      title="已将 Speaker ${state.mySpeakerId} 绑定为「我自己」(我说中文将自动译为外语)。点击可取消绑定"
+                      title="已将 Speaker ${state.mySpeakerId} 绑定为「我自己」(标记本人发言并屏蔽抢答弹窗；单向/本地模式自动译为外语，双向模式由 Soniox 原生互译)。点击可取消绑定"
                       onclick="window.__livehear_action('toggleMySpeaker', ${state.mySpeakerId})">
                 <span>🎙️ 我: Speaker ${state.mySpeakerId}</span>
                 <span class="ms-clear">✕</span>
@@ -359,7 +364,7 @@ export function renderEmptyPlaceholder(isStreaming: boolean, hasPermission: bool
         !hasPermission
           ? `
         <button class="btn-primary no-drag start-cta-btn" onclick="window.__livehear_action('requestMicPermission')">
-          🎙️ 立即请求 macOS 麦克风授权
+          🎙️ 立即请求系统麦克风授权
         </button>
       `
           : !isStreaming
@@ -510,7 +515,7 @@ export function renderSubtitleTurnHtml(
                     ${canSelectSpeaker ? `onclick="window.__livehear_action('toggleMySpeaker', ${item.speakerId})"` : ''}></div>`
             : `
           <div class="turn-speaker-avatar ${speakerClass} ${canSelectSpeaker ? 'clickable-avatar no-drag' : ''}"
-               title="${canSelectSpeaker ? (isMe ? '当前已设为「我自己」· 点击取消绑定' : `点击将 ${escapeHtml(item.speaker)} 设为「我自己」(我说中文将自动译为 ${escapeHtml(speakUpper)})`) : escapeHtml(displaySpeakerName)}"
+               title="${canSelectSpeaker ? (isMe ? '当前已设为「我自己」· 点击取消绑定' : `点击将 ${escapeHtml(item.speaker)} 设为「我自己」(标记我方发言与屏蔽抢答；单向/本地模式自动译为 ${escapeHtml(speakUpper)})`) : escapeHtml(displaySpeakerName)}"
                ${canSelectSpeaker ? `onclick="window.__livehear_action('toggleMySpeaker', ${item.speakerId})"` : ''}>
             <span class="avatar-icon">${isMe ? '🎙️' : '👤'}</span>
           </div>
@@ -530,7 +535,7 @@ export function renderSubtitleTurnHtml(
               canSelectSpeaker
                 ? `
               <button class="turn-claim-me-btn no-drag ${isMe ? 'active' : ''}"
-                      title="${isMe ? '点击取消「我自己」绑定' : `点击将 ${item.speaker} 标记为「我自己」· 我说中文时自动译为 ${speakUpper}`}"
+                      title="${isMe ? '点击取消「我自己」绑定' : `点击将 ${item.speaker} 标记为「我自己」(过滤本人抢答弹窗；单向/本地模式自动译为 ${speakUpper})`}"
                       onclick="window.__livehear_action('toggleMySpeaker', ${item.speakerId})">
                 ${isMe ? '✓ 我本人' : '👆 设为我'}
               </button>
@@ -550,7 +555,7 @@ export function renderSubtitleTurnHtml(
               canSelectSpeaker
                 ? `
               <button class="turn-claim-me-btn no-drag ${isMe ? 'active' : ''}"
-                      title="${isMe ? '点击取消「我自己」绑定' : `点击将 ${item.speaker} 标记为「我自己」· 我说中文时自动译为 ${speakUpper}`}"
+                      title="${isMe ? '点击取消「我自己」绑定' : `点击将 ${item.speaker} 标记为「我自己」(过滤本人抢答弹窗；单向/本地模式自动译为 ${speakUpper})`}"
                       onclick="window.__livehear_action('toggleMySpeaker', ${item.speakerId})">
                 ${isMe ? '✓ 我本人' : '👆 设为我'}
               </button>
@@ -944,7 +949,7 @@ export function renderQuickLangPopoverHtml(config: FullAppConfig): string {
       </div>
 
       <div class="ql-footer">
-        <span class="ql-tip">在字幕点击「👆 设为我」即可自动将你说的中文译为上方外语</span>
+        <span class="ql-tip">点击字幕「👆 设为我」可标记本人发言与过滤抢答（单向/本地模式自动译为外语；双向模式由 Soniox 原生互译）</span>
         <button class="btn-primary ql-apply-btn" onclick="window.__livehear_action('applyQuickLangConfig')">
           ⚡ 立即应用并热切
         </button>
@@ -1033,6 +1038,16 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
             </select>
             <div class="setting-tip">本地模式优先在停顿处分段，连续发言约 8 秒时切分；不支持说话人区分或双向自动互译，翻译依赖 AI 服务。</div>
           </div>
+          <div class="setting-row-2col">
+            <div class="setting-group">
+              <label>Ollama 服务地址 (Ollama URL)</label>
+              <input type="text" id="cfgOllamaUrl" value="${escapeHtml(config.asr_backend?.ollama_url || 'http://127.0.0.1:11434')}" placeholder="http://127.0.0.1:11434" />
+            </div>
+            <div class="setting-group">
+              <label>Ollama 本地识别模型 (Ollama Model)</label>
+              <input type="text" id="cfgOllamaModel" value="${escapeHtml(config.asr_backend?.ollama_model || 'livehear-qwen3-asr:1.7b')}" placeholder="livehear-qwen3-asr:1.7b" />
+            </div>
+          </div>
           <div class="setting-group">
             <label>Soniox API Key (项目专有密钥)</label>
             <div class="input-with-button">
@@ -1105,9 +1120,11 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
             <div class="setting-group">
               <label>多人会议断句窗口 (Endpoint Delay)</label>
               <select id="cfgEndpointDelay">
-                <option value="1500" ${(config.soniox.max_endpoint_delay_ms || 2000) <= 1600 ? 'selected' : ''}>⚡ 紧凑对话 (1500ms · 快节奏问答)</option>
-                <option value="2000" ${(config.soniox.max_endpoint_delay_ms || 2000) > 1600 && (config.soniox.max_endpoint_delay_ms || 2000) <= 2300 ? 'selected' : ''}>🎯 多人会议标准 (2000ms)</option>
-                <option value="2600" ${(config.soniox.max_endpoint_delay_ms || 2000) > 2300 ? 'selected' : ''}>🎙️ 深度长句讨论 (2600ms · 复杂从句最稳)</option>
+                <option value="600" ${(config.soniox.max_endpoint_delay_ms ?? 2000) <= 800 ? 'selected' : ''}>⚡ 极速响应 (600ms · 低延迟字幕)</option>
+                <option value="1000" ${(config.soniox.max_endpoint_delay_ms ?? 2000) > 800 && (config.soniox.max_endpoint_delay_ms ?? 2000) <= 1250 ? 'selected' : ''}>⚡ 敏捷对话 (1000ms)</option>
+                <option value="1500" ${(config.soniox.max_endpoint_delay_ms ?? 2000) > 1250 && (config.soniox.max_endpoint_delay_ms ?? 2000) <= 1600 ? 'selected' : ''}>⚡ 紧凑对话 (1500ms · 快节奏问答)</option>
+                <option value="2000" ${(config.soniox.max_endpoint_delay_ms ?? 2000) > 1600 && (config.soniox.max_endpoint_delay_ms ?? 2000) <= 2300 ? 'selected' : ''}>🎯 多人会议标准 (2000ms)</option>
+                <option value="2600" ${(config.soniox.max_endpoint_delay_ms ?? 2000) > 2300 ? 'selected' : ''}>🎙️ 深度长句讨论 (2600ms · 复杂从句最稳)</option>
               </select>
               <div class="setting-tip">留足上下文窗口供 Soniox 完整理解长句语义与声纹，消除半句切碎与直译错误。</div>
             </div>
@@ -1122,12 +1139,19 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
             </div>
           </div>
 
-          <div class="setting-group">
-            <label class="checkbox-label">
-              <input type="checkbox" id="cfgEnableVad" ${config.soniox.enable_vad !== false ? 'checked' : ''} />
-              <span>🌱 开启智能静音降费门禁 (Voice Activity Gating + 自动 Finalize)</span>
-            </label>
-            <div class="setting-tip">检测到停顿后发送 <code>finalize</code> 并暂停静音音频，保留约 500ms 的预卷缓冲。</div>
+          <div class="setting-row-2col">
+            <div class="setting-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="cfgEnableVad" ${config.soniox.enable_vad !== false ? 'checked' : ''} />
+                <span>🌱 开启智能静音降费门禁 (Voice Activity Gating + 自动 Finalize)</span>
+              </label>
+              <div class="setting-tip">检测到停顿后发送 <code>finalize</code> 并暂停静音音频，保留约 500ms 的预卷缓冲。</div>
+            </div>
+            <div class="setting-group">
+              <label>静音门禁灵敏度阈值 (VAD Threshold)</label>
+              <input type="number" id="cfgVadThreshold" step="0.1" min="0.8" max="15.0" value="${config.soniox.vad_threshold ?? 1.8}" />
+              <div class="setting-tip">默认 1.8；底噪较大时可调高至 2.5~4.0，远场小声说话可降至 1.0~1.5。</div>
+            </div>
           </div>
 
           <div class="setting-group">
@@ -1153,9 +1177,9 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
           </div>
 
           <div class="setting-group">
-            <label>AI 同传润色与串联模型 (Model)</label>
+            <label>AI 智囊统一模型 (Model)</label>
             <input type="text" id="cfgOpenRouterModel" value="${escapeHtml(config.openrouter.translate_model || 'deepseek/deepseek-chat')}" placeholder="deepseek/deepseek-chat" />
-            <div class="setting-tip">推荐配置低延迟模型 (如 deepseek/deepseek-chat 或 gpt-4o-mini)，极速执行同一发言人多句合并后的自然润色与口语去重。</div>
+            <div class="setting-tip">推荐配置低延迟模型 (如 deepseek/deepseek-chat 或 gpt-4o-mini)，保存后将同步应用于 AI 翻译、上下文润色、Jev 问句检测与应答建议生成。</div>
           </div>
 
           <div class="setting-group">
@@ -1225,7 +1249,7 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
                 <div class="setting-tip">戴耳机开会时，可切换至 BlackHole / Loopback 等虚拟内录设备以直接捕获 100% 纯净系统原声。</div>
               </div>
               <div class="mic-status-row">
-                <span>macOS 麦克风授权:</span>
+                <span>系统麦克风授权:</span>
                 <span class="${state.hasMicPermission ? 'text-success' : 'text-danger'}">
                   ${state.hasMicPermission ? '✅ 已授权' : '❌ 未授权'}
                 </span>

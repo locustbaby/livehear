@@ -1212,7 +1212,8 @@ fn process_token_batch(
             } else {
                 if tok_conf < 0.78 {
                     let w = clean_text.trim();
-                    if w.chars().count() >= 2 && state.low_confidence_words.len() < 8 {
+                    let has_cjk = w.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+                    if (w.chars().count() >= 2 || has_cjk) && state.low_confidence_words.len() < 8 {
                         let entry = format!("{}({:.2})", w, tok_conf);
                         if !state.low_confidence_words.contains(&entry) {
                             state.low_confidence_words.push(entry);
@@ -1521,5 +1522,43 @@ mod tests {
             second_msg.translated_text.as_deref(),
             Some("实际上，我们需要在生产发布前完成数据库迁移。")
         );
+    }
+
+    #[test]
+    fn test_single_cjk_low_confidence_token_is_captured_unlike_single_ascii() {
+        let (tx, mut rx) = broadcast::channel(32);
+        let mut state = UtteranceState::new(false, "one_way".to_string(), "zh".to_string());
+
+        let mut cjk_tok = make_token("幂", true, Some("original"), Some("1"));
+        cjk_tok.confidence = Some(0.55);
+        cjk_tok.language = Some("zh".to_string());
+
+        let mut ascii_tok = make_token("a", true, Some("original"), Some("1"));
+        ascii_tok.confidence = Some(0.55);
+        ascii_tok.language = Some("en".to_string());
+
+        let mut long_tok = make_token(
+            "等性需要保证在架构评审里面确认清楚。",
+            true,
+            Some("original"),
+            Some("1"),
+        );
+        long_tok.confidence = Some(0.95);
+        long_tok.language = Some("zh".to_string());
+
+        process_token_batch(
+            &mut state,
+            vec![
+                ascii_tok,
+                cjk_tok,
+                long_tok,
+                make_token("<end>", true, Some("original"), Some("1")),
+            ],
+            &tx,
+        );
+
+        let final_seg = rx.try_recv().expect("should emit final segment");
+        assert!(final_seg.is_final);
+        assert_eq!(final_seg.low_confidence_words, vec!["幂(0.55)".to_string()]);
     }
 }

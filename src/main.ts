@@ -272,6 +272,7 @@ class LiveHearApp {
   private asrToggleBusy = false;
   private speakLanguageBusy = false;
   private quickSpeakRequest = 0;
+  private clickThroughBlurred = false;
   private isStopping = false;
   private streamEpoch = 0;
   private lastPolishErrorAt = 0;
@@ -420,6 +421,14 @@ class LiveHearApp {
           this.updateMicVolume(vol);
         });
 
+        // 2. Soniox 实时端到端延迟监听
+        await listen('soniox-latency', (event: any) => {
+          const latencyMs = Number(event.payload?.latency_ms ?? 0);
+          if (Number.isFinite(latencyMs)) {
+            this.updateLatencyBadge(latencyMs);
+          }
+        });
+
         // 3. ASR 运行状态机监听
         await listen('asr-status', (event: any) => {
           const status = event.payload;
@@ -443,6 +452,7 @@ class LiveHearApp {
               liveBtn.innerHTML = `<span class="live-dot-pulse"></span><span class="live-text">开始同传</span>`;
             }
             this.updateMicVolume(0);
+            this.updateLatencyBadge(0);
           }
         });
 
@@ -522,7 +532,7 @@ class LiveHearApp {
           const elapsed = last.lastUpdatedMs ? nowMs - last.lastUpdatedMs : 0;
           if (
             !last.isPartial &&
-            !last.aiOriginal && !last.aiTranslation &&
+            !last.showingRaw &&
             last.speaker === speaker &&
             elapsed < 6500 &&
             !isParagraphFull(last.original)
@@ -532,7 +542,7 @@ class LiveHearApp {
               baseOrig: last.original,
               baseTrans: last.translated,
               baseRawOrig: last.rawOriginal || last.original,
-              baseRawTrans: last.rawTranslation || '',
+              baseRawTrans: last.rawTranslation || last.translated || '',
             };
             if (this.coalesceMap.size >= 64) {
               const oldestKey = this.coalesceMap.keys().next().value;
@@ -575,6 +585,11 @@ class LiveHearApp {
           const binding = resolveCoalesceBinding(rawTurnId, speaker, nowMs);
 
           if (binding) {
+            const pendingTimer = this.polishTimers.get(binding.targetId);
+            if (pendingTimer) {
+              clearTimeout(pendingTimer);
+              this.polishTimers.delete(binding.targetId);
+            }
             const targetIdx = this.findSubtitleIndexById(binding.targetId);
             if (targetIdx >= 0) {
               const target = this.hudState.subtitles[targetIdx];
@@ -669,6 +684,11 @@ class LiveHearApp {
           this.coalesceMap.delete(rawTurnId);
 
           if (binding) {
+            const pendingTimer = this.polishTimers.get(binding.targetId);
+            if (pendingTimer) {
+              clearTimeout(pendingTimer);
+              this.polishTimers.delete(binding.targetId);
+            }
             const targetIdx = this.findSubtitleIndexById(binding.targetId);
             if (targetIdx >= 0) {
               const target = this.hudState.subtitles[targetIdx];
@@ -792,9 +812,24 @@ class LiveHearApp {
   }
 
   private bindKeyboardShortcuts() {
+    window.addEventListener('blur', () => {
+      if (this.hudState.isClickThrough) {
+        this.clickThroughBlurred = true;
+      }
+    });
+    window.addEventListener('focus', () => {
+      if (this.hudState.isClickThrough && this.clickThroughBlurred) {
+        this.clickThroughBlurred = false;
+        void this.handleAction('toggleClickThrough');
+      }
+    });
     window.addEventListener('keydown', (e) => {
       const isCmd = e.metaKey || e.ctrlKey;
       if (e.key === 'Escape') {
+        if (this.hudState.isClickThrough) {
+          void this.handleAction('toggleClickThrough');
+          return;
+        }
         this.closeSelectionLookup();
         if (this.hudState.isQuickLangOpen) {
           this.handleAction('toggleQuickLangPopover');
@@ -837,6 +872,7 @@ class LiveHearApp {
     let lookupDebounce: any = null;
 
     const handleTriggerLookup = (e: MouseEvent) => {
+      const isDblClick = e.type === 'dblclick';
       const target = e.target as HTMLElement | null;
       if (!target) return;
       if (
@@ -861,6 +897,13 @@ class LiveHearApp {
         if (!sel || sel.isCollapsed) return;
         const selectedText = sel.toString().trim();
         if (selectedText.length < 2 || selectedText.length > 180) return;
+
+        if (!this.appConfig.openrouter?.api_key?.trim()) {
+          if (isDblClick) {
+            this.showToast('⚠️ 请先在设置中配置 AI 智囊 API Key 以启用划词精译');
+          }
+          return;
+        }
 
         let rect: DOMRect | null = null;
         try {
@@ -1037,11 +1080,17 @@ class LiveHearApp {
     }
   }
 
+  private hasNativeTwoWaySpeakTranslation(): boolean {
+    return (
+      this.appConfig.asr_backend?.provider !== 'ollama' &&
+      this.appConfig.soniox.enable_translation !== false &&
+      (this.appConfig.soniox.target_language || 'zh') === 'zh' &&
+      this.appConfig.soniox.translation_type === 'two_way'
+    );
+  }
+
   private async translateTurnToForeign(turnId: string, silent = false) {
-    if (silent && this.appConfig.asr_backend?.provider !== 'ollama' &&
-        this.appConfig.soniox.enable_translation !== false &&
-        (this.appConfig.soniox.target_language || 'zh') === 'zh' &&
-        this.appConfig.soniox.translation_type === 'two_way') return;
+    if (silent && this.hasNativeTwoWaySpeakTranslation()) return;
     if (this.translatingTurnIds.has(turnId)) return;
     const curIdx = this.findSubtitleIndexById(turnId);
     if (curIdx < 0) return;
@@ -1158,7 +1207,8 @@ class LiveHearApp {
       (item.detectedLanguage === 'zh' || detectTextLanguage(origTrimmed) === 'zh') &&
       cjkCount >= 2;
 
-    if (isMe && isChinese) {
+    const hasNativeTwoWay = this.hasNativeTwoWaySpeakTranslation();
+    if (isMe && isChinese && !hasNativeTwoWay) {
       this.translateTurnToForeign(item.id, true);
       return;
     }
@@ -1201,8 +1251,11 @@ class LiveHearApp {
           draft: curItem.translated,
           recentHistory: prevTurns,
           lowConfidenceWords: curItem.lowConfidenceWords || [],
-          targetLang: curItem.speaker !== '本地音频（未区分说话人）' && this.appConfig.soniox.translation_type === 'two_way' &&
-            curItem.detectedLanguage === this.appConfig.soniox.target_language
+          targetLang:
+            curItem.speaker !== '本地音频（未区分说话人）' &&
+            this.appConfig.soniox.translation_type === 'two_way' &&
+            (curItem.detectedLanguage || detectTextLanguage(curItem.original)) ===
+              (this.appConfig.soniox.target_language || 'zh')
               ? (this.appConfig.soniox.speak_target_language || 'en')
               : (this.appConfig.soniox.target_language || 'zh'),
           speakMode: false,
@@ -1215,11 +1268,11 @@ class LiveHearApp {
             !this.isPolishEnabled() ||
             cur.original !== sourceSnapshot || cur.translated !== draftSnapshot) return;
 
-        // 若在等待期间用户已将该句手动译为外语或标记为「我」，则不覆盖其外语译文
+        // 若在等待期间用户已将该句手动译为外语或在非原生双向模式下标记为「我」，则不覆盖其外语译文
         const curIsMe =
           !cur.isTrackRemote ||
           (Boolean(this.hudState.mySpeakerId) && cur.speakerId === this.hudState.mySpeakerId);
-        if (curIsMe && isChinese) return;
+        if (curIsMe && isChinese && !this.hasNativeTwoWaySpeakTranslation()) return;
 
         let nextOrig = cur.original;
         let nextTrans = cur.translated;
@@ -1525,7 +1578,9 @@ class LiveHearApp {
           this.streamManager.mySpeakerId = spkNum;
           const speakUpper = (this.appConfig.soniox.speak_target_language || 'en').toUpperCase();
           this.showToast(
-            `🎙️ 已将 Speaker ${spkNum} 设为「我自己」！你说中文时将自动译为 ${speakUpper} 口语`
+            this.hasNativeTwoWaySpeakTranslation()
+              ? `🎙️ 已将 Speaker ${spkNum} 设为「我自己」(将标记本人发言并屏蔽抢答弹窗)`
+              : `🎙️ 已将 Speaker ${spkNum} 设为「我自己」！你说中文时将自动译为 ${speakUpper} 口语`
           );
 
           // 立即将该 Speaker 最近说的尚未翻成外语的中文句子翻译成目标外语
@@ -1705,14 +1760,21 @@ class LiveHearApp {
         if (typeof payload === 'string' && payload.trim()) {
           const term = payload.trim();
           const existing = this.appConfig.soniox.custom_terms || [];
-          if (!existing.includes(term)) {
+          const added = !existing.includes(term);
+          if (added) {
             this.appConfig.soniox.custom_terms = [...existing, term];
             try {
               await tauriInvoke('save_config', { newConfig: this.appConfig });
             } catch {}
           }
           this.closeSelectionLookup();
-          this.showToast(`✅ 已将「${term}」加入会议术语表`);
+          if (added && this.hudState.isStreaming && this.appConfig.asr_backend?.provider !== 'ollama') {
+            await this.stopLiveStream(false);
+            await this.startLiveStream();
+            this.showToast(`✅ 已将「${term}」加入会议术语表并热重载识别流`);
+          } else {
+            this.showToast(`✅ 已将「${term}」加入会议术语表`);
+          }
         }
         break;
 
@@ -1770,6 +1832,9 @@ class LiveHearApp {
 
       case 'toggleClickThrough': {
         this.hudState.isClickThrough = !this.hudState.isClickThrough;
+        if (!this.hudState.isClickThrough) {
+          this.clickThroughBlurred = false;
+        }
         const ctBtn = document.getElementById('btnToggleClickThrough');
         const hudWin = document.querySelector('.hud-window');
         if (ctBtn) {
@@ -1784,7 +1849,7 @@ class LiveHearApp {
           await tauriInvoke('set_click_through', { enabled: Boolean(this.hudState.isClickThrough) });
           this.showToast(
             this.hudState.isClickThrough
-              ? '👻 鼠标穿透已开启 (按 ⌘+Shift+X 随时恢复交互)'
+              ? '👻 鼠标穿透已开启 (切回本窗口或按 Esc / ⌘+Shift+X 恢复交互)'
               : '已退出鼠标穿透，恢复窗口点击交互'
           );
         } catch (err: any) {
@@ -1956,12 +2021,24 @@ class LiveHearApp {
         break;
 
       case 'saveAllConfig':
-        const asrProvider = document.getElementById('cfgAsrProvider') as HTMLSelectElement;
-        if (asrProvider) this.appConfig.asr_backend = {
-          provider: asrProvider.value,
-          ollama_url: this.appConfig.asr_backend?.ollama_url || 'http://127.0.0.1:11434',
-          ollama_model: this.appConfig.asr_backend?.ollama_model || 'livehear-qwen3-asr:1.7b',
-        };
+        const asrProvider = document.getElementById('cfgAsrProvider') as HTMLSelectElement | null;
+        const ollamaUrlInput = document.getElementById('cfgOllamaUrl') as HTMLInputElement | null;
+        const ollamaModelInput = document.getElementById('cfgOllamaModel') as HTMLInputElement | null;
+        if (asrProvider || ollamaUrlInput || ollamaModelInput) {
+          this.appConfig.asr_backend = {
+            provider: asrProvider
+              ? asrProvider.value
+              : (this.appConfig.asr_backend?.provider || 'soniox'),
+            ollama_url:
+              ollamaUrlInput?.value.trim() ||
+              this.appConfig.asr_backend?.ollama_url ||
+              'http://127.0.0.1:11434',
+            ollama_model:
+              ollamaModelInput?.value.trim() ||
+              this.appConfig.asr_backend?.ollama_model ||
+              'livehear-qwen3-asr:1.7b',
+          };
+        }
         const sonioxInput = document.getElementById('cfgSonioxApiKey') as HTMLInputElement;
         if (sonioxInput) this.appConfig.soniox.api_key = sonioxInput.value.trim();
 
@@ -2017,6 +2094,14 @@ class LiveHearApp {
           this.appConfig.soniox.enable_vad = vadCheckbox.checked;
         }
 
+        const vadThresholdInput = document.getElementById('cfgVadThreshold') as HTMLInputElement | null;
+        if (vadThresholdInput) {
+          const parsedVad = parseFloat(vadThresholdInput.value);
+          if (Number.isFinite(parsedVad)) {
+            this.appConfig.soniox.vad_threshold = Math.min(50.0, Math.max(0.8, parsedVad));
+          }
+        }
+
         const inputDeviceSelect = document.getElementById('cfgInputDevice') as HTMLSelectElement;
         if (inputDeviceSelect) {
           const devVal = inputDeviceSelect.value.trim();
@@ -2057,7 +2142,10 @@ class LiveHearApp {
 
         const modelInput = document.getElementById('cfgOpenRouterModel') as HTMLInputElement;
         if (modelInput && modelInput.value.trim()) {
-          this.appConfig.openrouter.translate_model = modelInput.value.trim();
+          const unifiedModel = modelInput.value.trim();
+          this.appConfig.openrouter.translate_model = unifiedModel;
+          this.appConfig.openrouter.predict_model = unifiedModel;
+          this.appConfig.jev.model = unifiedModel;
         }
 
         const polishCb = document.getElementById('cfgEnablePolish') as HTMLInputElement;
@@ -2104,9 +2192,26 @@ class LiveHearApp {
     }
   }
 
+  private updateLatencyBadge(latencyMs: number) {
+    this.hudState.sonioxLatencyMs = latencyMs;
+    const badge = document.getElementById('sonioxLatencyBadge');
+    if (!badge) return;
+    const show =
+      this.hudState.isStreaming &&
+      latencyMs > 0 &&
+      this.appConfig.asr_backend?.provider !== 'ollama';
+    badge.style.display = show ? '' : 'none';
+    if (show) {
+      badge.textContent = `⚡ ${latencyMs}ms`;
+    }
+  }
+
   private refreshTopbarBadges() {
     const asrButton = document.getElementById('btnAsrBackend');
     if (asrButton) asrButton.textContent = this.appConfig.asr_backend?.provider === 'ollama' ? '识别：Ollama' : '识别：Soniox';
+    this.updateLatencyBadge(
+      this.appConfig.asr_backend?.provider === 'ollama' ? 0 : this.hudState.sonioxLatencyMs
+    );
     const polishButton = document.getElementById('btnTogglePolish');
     const enabled = this.appConfig.openrouter.enable_polish !== false;
     if (polishButton) {
@@ -2133,7 +2238,7 @@ class LiveHearApp {
       mySpkSlot.innerHTML = this.hudState.mySpeakerId
         ? `
           <button class="my-speaker-top-pill no-drag"
-                  title="已将 Speaker ${this.hudState.mySpeakerId} 绑定为「我自己」(我说中文将自动译为外语)。点击可取消绑定"
+                  title="已将 Speaker ${this.hudState.mySpeakerId} 绑定为「我自己」(标记本人发言并屏蔽抢答弹窗；单向/本地模式自动译为外语，双向模式由 Soniox 原生互译)。点击可取消绑定"
                   onclick="window.__livehear_action('toggleMySpeaker', ${this.hudState.mySpeakerId})">
             <span>🎙️ 我: Speaker ${this.hudState.mySpeakerId}</span>
             <span class="ms-clear">✕</span>
@@ -2442,6 +2547,7 @@ class LiveHearApp {
     this.hudState.isStreaming = false;
     this.coalesceMap.clear();
     this.updateMicVolume(0);
+    this.updateLatencyBadge(0);
 
     const liveBtn = document.getElementById('btnToggleLive');
     if (liveBtn) {

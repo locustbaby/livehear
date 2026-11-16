@@ -8,6 +8,8 @@ const ts = require('typescript');
 
 function harness() {
   const listeners = new Map();
+  const windowListeners = new Map();
+  const elements = new Map();
   const calls = [];
   const requests = [];
   const overrides = new Map();
@@ -17,15 +19,34 @@ function harness() {
   const dock = { set innerHTML(value) { input = { value: '' }; } };
   const context = {
     exports: {}, console: {log() {}, warn() {}, error() {}}, setTimeout, clearTimeout,
-    window: { __TAURI_INTERNALS__: {}, addEventListener() {} },
-    document: { getElementById(id) {
-      return id === 'quickSpeakInput' ? input : id === 'quickSpeakDockContainer' ? dock : null;
-    } },
+    window: {
+      __TAURI_INTERNALS__: {},
+      addEventListener(event, handler) {
+        if (!windowListeners.has(event)) windowListeners.set(event, []);
+        windowListeners.get(event).push(handler);
+      },
+    },
+    document: {
+      getElementById(id) {
+        if (elements.has(id)) return elements.get(id);
+        return id === 'quickSpeakInput' ? input : id === 'quickSpeakDockContainer' ? dock : null;
+      },
+      getElementsByName() { return []; },
+      querySelector() { return null; },
+    },
     navigator: { clipboard: { writeText: async text => clipboard.push(text) } },
   };
   context.require = name => {
     if (name === '@tauri-apps/api/event') return { listen: async (event, handler) => listeners.set(event, handler) };
-    if (name === './components/hud') return { renderQuickSpeakDockHtml: () => '' };
+    if (name === './components/hud') {
+      const hudExports = {};
+      const hudSource = fs.readFileSync(path.join(__dirname, '../src/components/hud.ts'), 'utf8');
+      vm.runInContext(
+        ts.transpileModule(hudSource, {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020}}).outputText,
+        vm.createContext({ exports: hudExports, module: { exports: hudExports } })
+      );
+      return { ...hudExports, renderQuickSpeakDockHtml: () => '' };
+    }
     if (name === '@tauri-apps/api/core') return { invoke: async (cmd, args) => {
       calls.push({cmd, args});
       if (overrides.has(cmd)) return overrides.get(cmd)(args);
@@ -42,13 +63,15 @@ function harness() {
   vm.runInContext(ts.transpileModule(source, {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020}}).outputText, context);
   const App = context.exports.LiveHearApp;
   const initListeners = App.prototype.initTauriListeners;
+  const bindShortcuts = App.prototype.bindKeyboardShortcuts;
   for (const name of ['detectPlatform', 'bindGlobalHandlers', 'bindKeyboardShortcuts', 'bindSelectionLookupListener', 'initTauriListeners', 'initialRender', 'loadConfigAndAutoStart']) App.prototype[name] = () => {};
   const app = new App();
   app.showToast = () => {};
   app.refreshTopbarBadges = () => {};
-  for (const name of ['finalizeLastCard', 'updateOrAppendPartial', 'refreshDisplayMode', 'clear']) app.streamManager[name] = () => {};
-  return { app, calls, requests, clipboard, listeners, overrides, context,
+  for (const name of ['finalizeLastCard', 'updateOrAppendPartial', 'refreshDisplayMode', 'updateLastFinalTurn', 'clear']) app.streamManager[name] = () => {};
+  return { app, calls, requests, clipboard, listeners, windowListeners, elements, overrides, context,
     init: () => initListeners.call(app),
+    bindKeyboardShortcuts: () => bindShortcuts.call(app),
     input: value => value === undefined ? input.value : (input.value = value),
   };
 }
@@ -229,4 +252,109 @@ test('binding my speaker leaves live Chinese translation to Soniox and manual EN
   assert.equal(requests[0].args.speakMode, true);
   assert.equal(requests[0].args.targetLang, 'en');
   assert.equal(h.clipboard.at(-1), "Hello, we'll meet tomorrow.");
+});
+
+test('saveAllConfig synchronizes AI models and preserves endpoint delay, vad_threshold, and ollama config', async () => {
+  const h = harness();
+  h.elements.set('cfgAsrProvider', { value: 'ollama' });
+  h.elements.set('cfgOllamaUrl', { value: 'http://127.0.0.1:11435' });
+  h.elements.set('cfgOllamaModel', { value: 'qwen3-asr-custom' });
+  h.elements.set('cfgEndpointDelay', { value: '600' });
+  h.elements.set('cfgVadThreshold', { value: '3.2' });
+  h.elements.set('cfgOpenRouterModel', { value: 'deepseek-v4.1-flash' });
+  await h.app.handleAction('saveAllConfig');
+  assert.equal(h.app.appConfig.asr_backend.provider, 'ollama');
+  assert.equal(h.app.appConfig.asr_backend.ollama_url, 'http://127.0.0.1:11435');
+  assert.equal(h.app.appConfig.asr_backend.ollama_model, 'qwen3-asr-custom');
+  assert.equal(h.app.appConfig.soniox.max_endpoint_delay_ms, 600);
+  assert.equal(h.app.appConfig.soniox.vad_threshold, 3.2);
+  assert.equal(h.app.appConfig.openrouter.translate_model, 'deepseek-v4.1-flash');
+  assert.equal(h.app.appConfig.openrouter.predict_model, 'deepseek-v4.1-flash');
+  assert.equal(h.app.appConfig.jev.model, 'deepseek-v4.1-flash');
+});
+
+test('coalescing merges same-speaker turns within 6.5s even after earlier polish and repolishes combined turn', async () => {
+  const h = harness();
+  h.app.appConfig.openrouter.api_key = 'test';
+  h.app.appConfig.openrouter.enable_polish = true;
+  await h.init();
+  const polishWaiters = [];
+  h.overrides.set('polish_transcript', async (args) => {
+    const res = { original: `${args.original}!`, translated: `${args.draft}!` };
+    if (polishWaiters.length > 0) polishWaiters.shift()(args);
+    return res;
+  });
+  const waitNextPolish = () => new Promise((resolve) => polishWaiters.push(resolve));
+  const final = (id, text, translated) => h.listeners.get('asr-final')({payload: {segment: {
+    id, text, translated_text: translated, asr_translation: translated, detected_language: 'en',
+    speaker: {id: 1, display_name: 'Speaker 1'},
+  }}});
+
+  const firstPolishDone = waitNextPolish();
+  final('a', 'First sentence.', '第一句。');
+  await firstPolishDone;
+  await tick();
+  assert.equal(h.app.hudState.subtitles[0].aiOriginal, 'First sentence.!');
+
+  const secondPolishDone = waitNextPolish();
+  final('b', 'Second sentence.', '第二句。');
+  assert.equal(h.app.hudState.subtitles.length, 1);
+  assert.ok(h.app.hudState.subtitles[0].original.includes('Second sentence.'));
+  const secondArgs = await secondPolishDone;
+  await tick();
+  assert.ok(secondArgs.original.includes('First sentence.!'));
+  assert.ok(secondArgs.original.includes('Second sentence.'));
+});
+
+test('two_way mode with enable_polish true polishes bound speaker Chinese turn', async () => {
+  const h = harness();
+  h.app.appConfig.openrouter.api_key = 'test';
+  h.app.appConfig.openrouter.enable_polish = true;
+  h.app.appConfig.soniox.translation_type = 'two_way';
+  await h.init();
+  await h.app.handleAction('toggleMySpeaker', 2);
+  let polishArgs = null;
+  let resolvePolish;
+  const polishDone = new Promise((resolve) => { resolvePolish = resolve; });
+  h.overrides.set('polish_transcript', async (args) => {
+    polishArgs = args;
+    return { original: '我们明天开会', translated: 'Let us meet tomorrow.' };
+  });
+  h.listeners.get('asr-final')({payload: {segment: {
+    id: 'zh-1', text: '我们明天开会', translated_text: "We'll meet tomorrow.", asr_translation: "We'll meet tomorrow.",
+    detected_language: 'zh', speaker: {id: 2, display_name: 'Speaker 2'},
+  }}});
+  const origInvoke = h.overrides.get('polish_transcript');
+  h.overrides.set('polish_transcript', async (args) => {
+    const out = await origInvoke(args);
+    resolvePolish();
+    return out;
+  });
+  await polishDone;
+  await tick();
+  assert.equal(polishArgs.speakMode, false);
+  assert.equal(polishArgs.targetLang, 'en');
+  assert.equal(h.app.hudState.subtitles[0].translated, 'Let us meet tomorrow.');
+});
+
+test('click-through mode restores interaction on Escape or window blur then focus', async () => {
+  const h = harness();
+  h.bindKeyboardShortcuts();
+  await h.app.handleAction('toggleClickThrough');
+  assert.equal(h.app.hudState.isClickThrough, true);
+
+  for (const fn of h.windowListeners.get('blur') || []) fn();
+  for (const fn of h.windowListeners.get('focus') || []) fn();
+  await tick();
+  assert.equal(h.app.hudState.isClickThrough, false);
+
+  await h.app.handleAction('toggleClickThrough');
+  assert.equal(h.app.hudState.isClickThrough, true);
+  for (const fn of h.windowListeners.get('keydown') || []) {
+    fn({ key: 'Escape', metaKey: false, ctrlKey: false, shiftKey: false, preventDefault() {} });
+  }
+  await tick();
+  assert.equal(h.app.hudState.isClickThrough, false);
+  const ctCalls = h.calls.filter(c => c.cmd === 'set_click_through').map(c => c.args.enabled);
+  assert.deepEqual(ctCalls, [true, false, true, false]);
 });

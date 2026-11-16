@@ -144,7 +144,7 @@ impl Default for OpenRouterConfig {
             api_key: String::new(),
             base_url: "https://openrouter.ai/api/v1".to_string(),
             translate_model: "deepseek/deepseek-chat".to_string(),
-            predict_model: "anthropic/claude-3.5-haiku".to_string(),
+            predict_model: "deepseek/deepseek-chat".to_string(),
             enable_polish: true,
         }
     }
@@ -165,7 +165,7 @@ impl Default for JevConfig {
             enabled: true,
             api_key: String::new(),
             base_url: "https://openrouter.ai/api/v1".to_string(),
-            model: "typesafe/jev-1.13".to_string(),
+            model: "deepseek/deepseek-chat".to_string(),
             confidence_threshold: 0.8,
         }
     }
