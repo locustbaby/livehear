@@ -174,8 +174,8 @@ impl AudioDspPipeline {
         let chunk = std::mem::replace(&mut self.chunk_buffer, Vec::with_capacity(3200));
 
         let mut sum_sq: i64 = 0;
-        for c in chunk.chunks_exact(2) {
-            let v = i16::from_le_bytes([c[0], c[1]]) as i64;
+        for &c in chunk.as_chunks::<2>().0 {
+            let v = i16::from_le_bytes(c) as i64;
             sum_sq += v * v;
         }
         let mean_sq = (sum_sq as f64) / 1600.0;

@@ -26,12 +26,15 @@ impl AudioChunker {
         if chunk == [VAD_FINALIZE_SIGNAL] {
             return self.flush();
         }
-        let (sum, count) = chunk
-            .chunks_exact(2)
-            .fold((0u64, 0u64), |(sum, count), pair| {
-                let value = i16::from_le_bytes([pair[0], pair[1]]) as i64;
-                (sum + (value * value) as u64, count + 1)
-            });
+        let (sum, count) =
+            chunk
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .fold((0u64, 0u64), |(sum, count), &pair| {
+                    let value = i16::from_le_bytes(pair) as i64;
+                    (sum + (value * value) as u64, count + 1)
+                });
         let silent = count > 0 && sum / count < 350u64 * 350;
         self.has_speech |= !silent && count > 0;
         self.silence_bytes = if silent {
