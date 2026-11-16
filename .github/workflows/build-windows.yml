@@ -118,7 +118,10 @@ jobs:
         run: pnpm tauri build --target universal-apple-darwin
 
       - name: Archive macOS .app Bundle
-        run: ditto -c -k --sequesterRsrc --keepParent src-tauri/target/universal-apple-darwin/release/bundle/macos/LiveHear.app src-tauri/target/universal-apple-darwin/release/bundle/macos/LiveHear_0.1.0_universal.app.zip
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          BUNDLE=src-tauri/target/universal-apple-darwin/release/bundle/macos
+          ditto -c -k --sequesterRsrc --keepParent "$BUNDLE/LiveHear.app" "$BUNDLE/LiveHear_${VERSION}_universal.app.zip"
 
       - name: Upload macOS Installers Artifact
         uses: actions/upload-artifact@v4
@@ -126,7 +129,7 @@ jobs:
           name: LiveHear-macOS-Installers
           path: |
             src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
-            src-tauri/target/universal-apple-darwin/release/bundle/macos/LiveHear_0.1.0_universal.app.zip
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.zip
 
   release:
     needs: [build-windows, build-macos]
@@ -142,5 +145,10 @@ jobs:
       - name: Create GitHub Release for Version Tags
         uses: softprops/action-gh-release@v2
         with:
-          files: release-assets/*
+          files: |
+            release-assets/**/*.exe
+            release-assets/**/*.msi
+            release-assets/**/*.dmg
+            release-assets/**/*.app.zip
+          fail_on_unmatched_files: true
           generate_release_notes: true

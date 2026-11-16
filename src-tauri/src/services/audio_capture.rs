@@ -260,15 +260,18 @@ impl NativeAudioCapture {
             .map(str::trim)
             .filter(|s| !s.is_empty() && *s != "default")
             .and_then(|target_name| {
-                host.input_devices().ok().and_then(|mut devs| {
-                    devs.find(|d| {
-                        d.description()
-                            .map(|desc| {
-                                desc.name() == target_name || desc.name().contains(target_name)
-                            })
-                            .unwrap_or(false)
-                    })
-                })
+                let devs: Vec<_> = host.input_devices().ok()?.collect();
+                let name_of =
+                    |d: &cpal::Device| d.description().map(|desc| desc.name().to_string()).ok();
+                // Exact match first: "Microphone" must not pick "Microphone Array" just because it enumerates earlier.
+                let exact = devs
+                    .iter()
+                    .position(|d| name_of(d).as_deref() == Some(target_name));
+                let idx = exact.or_else(|| {
+                    devs.iter()
+                        .position(|d| name_of(d).is_some_and(|n| n.contains(target_name)))
+                })?;
+                devs.into_iter().nth(idx)
             })
             .or_else(|| host.default_input_device())
             .ok_or_else(|| {
@@ -295,8 +298,20 @@ impl NativeAudioCapture {
         let is_running = Arc::new(AtomicBool::new(true));
         let is_running_clone = is_running.clone();
 
-        let err_fn = move |err| {
+        let err_app = app.clone();
+        let err_reported = Arc::new(AtomicBool::new(false));
+        // Device unplug / default-device switch surfaces only here; tell the UI once instead of going silent.
+        let err_fn = move |err: cpal::Error| {
             eprintln!("⚠️ [LiveHear] 麦克风音频流错误: {}", err);
+            if !err_reported.swap(true, Ordering::Relaxed) {
+                let msg = match err.kind() {
+                    cpal::ErrorKind::DeviceNotAvailable => {
+                        "麦克风设备已断开或不可用，请重新连接设备后重启同传".to_string()
+                    }
+                    _ => format!("麦克风音频流错误: {}", err),
+                };
+                let _ = err_app.emit("asr-error", msg);
+            }
         };
 
         let sample_format = default_config.sample_format();

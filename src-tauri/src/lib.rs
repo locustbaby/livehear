@@ -16,6 +16,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            std::thread::spawn(transcript_archive::TranscriptArchive::sweep_stale);
             if let Ok(dir) = app.path().app_config_dir() {
                 AppConfig::init_path(dir);
             }
@@ -28,6 +29,7 @@ pub fn run() {
                 config: RwLock::new(initial_config),
                 transcript_archive: tokio::sync::Mutex::new(Default::default()),
                 orchestrator: RwLock::new(None),
+                lifecycle: tokio::sync::Mutex::new(()),
             }));
             #[cfg(not(target_os = "macos"))]
             if let Some(window) = app.get_webview_window("main") {
@@ -63,6 +65,14 @@ pub fn run() {
             commands::summarize_meeting_context,
             commands::generate_ai_minutes,
         ])
-        .run(tauri::generate_context!())
-        .expect("运行 LiveHear Tauri 应用发生错误");
+        .build(tauri::generate_context!())
+        .expect("运行 LiveHear Tauri 应用发生错误")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event
+                && let Some(container) = app.try_state::<Arc<AppContainer>>()
+                && let Ok(mut archive) = container.transcript_archive.try_lock()
+            {
+                archive.discard();
+            }
+        });
 }

@@ -156,6 +156,17 @@ export function renderHudView(
       <!-- 顶部轻量拖拽把手区 (按住可自由拖动浮窗) -->
       <div class="drag-handle-pill" data-tauri-drag-region title="按住拖拽移动 HUD 浮窗"></div>
 
+      <div class="win-window-controls no-drag">
+        <button class="win-ctrl-btn no-drag" title="最小化窗口" aria-label="最小化窗口"
+                onclick="window.__livehear_action('minimizeWindow')">
+          <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5.5h10"/></svg>
+        </button>
+        <button class="win-ctrl-btn close-btn no-drag" title="关闭窗口" aria-label="关闭窗口"
+                onclick="window.__livehear_action('closeWindow')">
+          <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10"/></svg>
+        </button>
+      </div>
+
       <!-- HUD 顶栏状态与控制 (左侧留出 70px 避让 macOS 原生红黄绿交通灯) -->
       <div class="hud-topbar" data-tauri-drag-region>
         <div class="hud-status-group" data-tauri-drag-region>
@@ -294,18 +305,6 @@ export function renderHudView(
             ⚙️
           </button>
 
-          <div class="win-window-controls no-drag">
-            <button class="icon-btn win-ctrl-btn no-drag"
-                    title="最小化窗口"
-                    onclick="window.__livehear_action('minimizeWindow')">
-              ─
-            </button>
-            <button class="icon-btn win-ctrl-btn close-btn no-drag"
-                    title="关闭窗口"
-                    onclick="window.__livehear_action('closeWindow')">
-              ✕
-            </button>
-          </div>
         </div>
       </div>
 
@@ -562,7 +561,7 @@ export function renderSubtitleTurnHtml(
               canSelectSpeaker
                 ? `
               <button class="turn-claim-me-btn no-drag ${isMe ? 'active' : ''}"
-                      title="${isMe ? '点击取消「我自己」绑定' : `点击将 ${item.speaker} 标记为「我自己」(过滤本人抢答弹窗；单向/本地模式自动译为 ${speakUpper})`}"
+                      title="${isMe ? '点击取消「我自己」绑定' : `点击将 ${escapeHtml(item.speaker)} 标记为「我自己」(过滤本人抢答弹窗；单向/本地模式自动译为 ${escapeHtml(speakUpper)})`}"
                       onclick="window.__livehear_action('toggleMySpeaker', ${item.speakerId})">
                 ${isMe ? '✓ 我本人' : '👆 设为我'}
               </button>
@@ -582,7 +581,7 @@ export function renderSubtitleTurnHtml(
               canSelectSpeaker
                 ? `
               <button class="turn-claim-me-btn no-drag ${isMe ? 'active' : ''}"
-                      title="${isMe ? '点击取消「我自己」绑定' : `点击将 ${item.speaker} 标记为「我自己」(过滤本人抢答弹窗；单向/本地模式自动译为 ${speakUpper})`}"
+                      title="${isMe ? '点击取消「我自己」绑定' : `点击将 ${escapeHtml(item.speaker)} 标记为「我自己」(过滤本人抢答弹窗；单向/本地模式自动译为 ${escapeHtml(speakUpper)})`}"
                       onclick="window.__livehear_action('toggleMySpeaker', ${item.speakerId})">
                 ${isMe ? '✓ 我本人' : '👆 设为我'}
               </button>

@@ -21,23 +21,35 @@ body {
 
 /* Custom Scrollbar */
 ::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.24);
+  border: 2px solid transparent;
+  background-clip: padding-box;
   border-radius: var(--radius-pill);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.42);
+  background-clip: padding-box;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 
-/* Draggable Region for Frameless Windows */
-[data-tauri-drag-region] {
-  -webkit-app-region: drag;
+/* Keyboard focus ring (mouse clicks don't trigger :focus-visible) */
+:where(button, [role="button"], a, input, select, textarea, summary):focus-visible {
+  outline: 2px solid var(--text-accent);
+  outline-offset: 2px;
 }
-button, input, select, textarea, .no-drag {
-  -webkit-app-region: no-drag;
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* Top App Container */
@@ -88,9 +100,7 @@ button, input, select, textarea, .no-drag {
   -webkit-backdrop-filter: var(--backdrop-blur);
   border: var(--border-window);
   border-radius: var(--radius-window);
-  box-shadow: var(--shadow-window);
   position: relative;
-  transform: translateZ(0);
   transition: border-color var(--transition-base), box-shadow var(--transition-base);
 }
 
@@ -277,16 +287,6 @@ button, input, select, textarea, .no-drag {
   border: 1px solid rgba(56, 189, 248, 0.25);
   border-radius: var(--radius-pill);
   white-space: nowrap;
-}
-
-/* 实时双语字幕流列表 */
-.subtitles-stream {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  overflow-y: auto;
-  padding: 10px 2px;
 }
 
 .empty-stream-placeholder {
@@ -716,8 +716,8 @@ button, input, select, textarea, .no-drag {
 
 /* 幽灵穿透激活态光环 */
 .hud-window.is-click-through {
-  border-color: rgba(56, 189, 248, 0.65) !important;
-  box-shadow: 0 0 24px rgba(56, 189, 248, 0.28), var(--shadow-window) !important;
+  border-color: rgba(56, 189, 248, 0.65);
+  box-shadow: inset 0 0 18px rgba(56, 189, 248, 0.22);
 }
 
 /* Jev 决策网关拦截并触发的推测建议 (Smart Response Drawer) */
@@ -1208,7 +1208,9 @@ button, input, select, textarea, .no-drag {
   position: absolute;
   top: 46px;
   left: 74px;
-  width: 390px;
+  width: min(390px, calc(100% - 28px));
+  max-height: calc(100% - 60px);
+  overflow-y: auto;
   background: rgba(18, 23, 34, 0.96);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
@@ -1910,28 +1912,69 @@ button, input, select, textarea, .no-drag {
 }
 
 
-
-
-
-
-
-.raw-transcript { margin-top: 8px; color: var(--color-text-secondary, #b9c0ce); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.raw-transcript { margin-top: 8px; color: var(--text-secondary); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .raw-transcript summary { cursor: pointer; }
 
 .win-window-controls {
   display: none;
-  align-items: center;
-  gap: 4px;
-  margin-left: 4px;
-  padding-left: 6px;
-  border-left: var(--border-subtle);
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 960;
+  border-top-right-radius: var(--radius-window);
+  overflow: hidden;
 }
 [data-platform="windows"] .win-window-controls,
 [data-platform="linux"] .win-window-controls {
-  display: inline-flex;
+  display: flex;
+}
+[data-platform="windows"] .hud-topbar,
+[data-platform="linux"] .hud-topbar {
+  padding-right: 82px;
+}
+/* Fluent caption buttons: flat 46x32 hit targets, red close on hover */
+.win-ctrl-btn {
+  width: 46px;
+  height: 32px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.win-ctrl-btn svg {
+  width: 10px;
+  height: 10px;
+  stroke: currentColor;
+  stroke-width: 1;
+  fill: none;
+}
+.win-ctrl-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+}
+.win-ctrl-btn:active {
+  background: rgba(255, 255, 255, 0.05);
 }
 .win-ctrl-btn.close-btn:hover {
-  background: rgba(239, 68, 68, 0.85);
-  border-color: rgba(248, 113, 113, 0.9);
+  background: #c42b1c;
   color: #ffffff;
+}
+.win-ctrl-btn.close-btn:active {
+  background: #b62d1f;
+}
+
+/* Narrow windows: drop secondary badges so the toolbar doesn't eat the subtitle area */
+@media (max-width: 640px) {
+  .hud-topbar .vad-eco-badge,
+  .hud-topbar .latency-badge {
+    display: none !important;
+  }
+  .hud-topbar {
+    gap: 8px;
+  }
 }

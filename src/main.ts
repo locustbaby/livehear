@@ -42,6 +42,10 @@ class SubtitleStreamManager {
   private maxDomNodes = 120;
   private pendingPartial: { item: SubtitleItem; displayMode: SubtitleDisplayMode } | null = null;
   private rafId: number | null = null;
+  // Updates for a block the user is selecting text in are held back, otherwise replacing
+  // the node collapses the selection and makes drag-to-lookup impossible on live cards.
+  private deferredUpdates = new Map<string, { item: SubtitleItem; displayMode: SubtitleDisplayMode; isPartial: boolean }>();
+  private selectionListenerBound = false;
   public mySpeakerId: number | null = null;
   public speakTargetLang = 'en';
 
@@ -124,6 +128,12 @@ class SubtitleStreamManager {
     if (!newEl) return;
 
     const existingById = this.findTurnBlockById(streamEl, item.id);
+    if (existingById && this.hasSelectionInside(existingById)) {
+      this.deferredUpdates.set(item.id, { item: { ...item }, displayMode, isPartial });
+      this.bindSelectionFlush();
+      return;
+    }
+    this.deferredUpdates.delete(item.id);
     if (existingById) {
       // 已存在同 ID 节点：取消重复入场动画，实现零闪烁就地更新
       newEl.style.animation = 'none';
@@ -145,6 +155,26 @@ class SubtitleStreamManager {
     if (!this.isUserScrolledUp) {
       this.scrollToBottom();
     }
+  }
+
+  private hasSelectionInside(el: HTMLElement): boolean {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
+    const range = sel.getRangeAt(0);
+    return el.contains(range.startContainer) || el.contains(range.endContainer);
+  }
+
+  private bindSelectionFlush() {
+    if (this.selectionListenerBound) return;
+    this.selectionListenerBound = true;
+    document.addEventListener('selectionchange', () => {
+      if (this.deferredUpdates.size === 0) return;
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed) return;
+      const pending = [...this.deferredUpdates.values()];
+      this.deferredUpdates.clear();
+      for (const u of pending) this.commitTurnDom(u.item, u.displayMode, u.isPartial);
+    });
   }
 
   public removeTurnById(id: string) {
@@ -197,7 +227,9 @@ class SubtitleStreamManager {
         this.isUserScrolledUp = false;
         const jumpBtn = document.getElementById('btnJumpToBottom');
         if (jumpBtn) jumpBtn.classList.add('hide');
-        streamEl.scrollTo({ top: streamEl.scrollHeight, behavior: 'smooth' });
+        // Instant jump: a smooth scroll emits intermediate scroll events that re-flag
+        // "user scrolled up" and stop auto-follow.
+        streamEl.scrollTop = streamEl.scrollHeight;
       } else if (!this.isUserScrolledUp) {
         streamEl.scrollTop = streamEl.scrollHeight;
       }
@@ -269,6 +301,13 @@ class LiveHearApp {
   private polishTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private polishJobs = new Set<Promise<void>>();
   private pendingTranslations = new Map<string, { segment_id: string; original: string; translated: string; error?: boolean }>();
+  // Turns merged into an earlier card keep their own segment id on the backend; route their
+  // async translation to the card that now displays them.
+  private translationAliases = new Map<string, string>();
+  // Quick-lang popover edits appConfig.soniox live for preview; this snapshot lets a dismiss
+  // (outside click / Esc / toggle) discard them instead of leaking into the next unrelated save.
+  private quickLangSnapshot: FullAppConfig['soniox'] | null = null;
+  private lookupSeq = 0;
   private polishEpoch = 0;
   private polishToggleBusy = false;
   private asrToggleBusy = false;
@@ -334,9 +373,9 @@ class LiveHearApp {
     this.bindGlobalHandlers();
     this.bindKeyboardShortcuts();
     this.bindSelectionLookupListener();
-    this.initTauriListeners();
+    const listenersReady = this.initTauriListeners();
     this.initialRender();
-    this.loadConfigAndAutoStart();
+    this.loadConfigAndAutoStart(listenersReady);
   }
 
   private detectPlatform() {
@@ -383,7 +422,7 @@ class LiveHearApp {
     }
   }
 
-  private async loadConfigAndAutoStart() {
+  private async loadConfigAndAutoStart(listenersReady: Promise<void> = Promise.resolve()) {
     try {
       const cfg = await tauriInvoke<FullAppConfig>('get_config');
       if (cfg) {
@@ -409,13 +448,23 @@ class LiveHearApp {
       return;
     }
 
+    // Starting before asr-status/asr-partial listeners exist drops the first events.
+    await listenersReady;
     await this.startLiveStream();
   }
 
   private async initTauriListeners() {
     if (hasNativeRuntime()) {
       try {
-        const { listen } = await import('@tauri-apps/api/event');
+        const { listen: rawListen } = await import('@tauri-apps/api/event');
+        // One failed registration must not silently skip every listener after it.
+        const listen = async (name: string, handler: (event: any) => void) => {
+          try {
+            await rawListen(name, handler);
+          } catch (err) {
+            console.warn(`注册事件监听失败 ${name}:`, err);
+          }
+        };
 
         // 1. 原生麦克风电平事件监听
         await listen('audio-level', (event: any) => {
@@ -449,6 +498,7 @@ class LiveHearApp {
             }
           } else if (status === 'stopped' || status === 'error') {
             this.hudState.isStreaming = false;
+            this.finalizeDanglingPartials();
             if (liveBtn) {
               liveBtn.className = 'live-status-pill no-drag paused';
               liveBtn.innerHTML = `<span class="live-dot-pulse"></span><span class="live-text">开始同传</span>`;
@@ -715,6 +765,17 @@ class LiveHearApp {
               }
 
               this.streamManager.finalizeLastCard(target, this.hudState.displayMode);
+              if (segment.translation_status === 'pending' && rawTurnId !== target.id) {
+                if (this.translationAliases.size >= 256) {
+                  this.translationAliases.delete(this.translationAliases.keys().next().value!);
+                }
+                this.translationAliases.set(rawTurnId, target.id);
+                const parked = this.pendingTranslations.get(rawTurnId);
+                if (parked) {
+                  this.pendingTranslations.delete(rawTurnId);
+                  this.applyAsrTranslation(parked);
+                }
+              }
               this.scheduleTurnPolish(target);
 
               if (payload.suggestions && payload.suggestions.length > 0) {
@@ -793,7 +854,8 @@ class LiveHearApp {
           const data = event.payload;
           if (!data || typeof data.segment_id !== 'string' || typeof data.original !== 'string' ||
               typeof data.translated !== 'string' || (!data.error && !data.translated.trim())) return;
-          if (this.findSubtitleIndexById(data.segment_id) < 0) {
+          const resolvedId = this.translationAliases.get(data.segment_id) ?? data.segment_id;
+          if (this.findSubtitleIndexById(resolvedId) < 0) {
             if (this.pendingTranslations.size >= 256) this.pendingTranslations.delete(this.pendingTranslations.keys().next().value!);
             this.pendingTranslations.set(data.segment_id, data);
           } else {
@@ -928,6 +990,7 @@ class LiveHearApp {
             ? Math.max(46, rect.top - 135)
             : rect.bottom + 8;
 
+        const seq = ++this.lookupSeq;
         this.renderSelectionLookup({
           text: selectedText,
           phonetic_or_type: '',
@@ -949,6 +1012,7 @@ class LiveHearApp {
             selection: selectedText,
             sentenceContext,
           });
+          if (seq !== this.lookupSeq) return;
           this.renderSelectionLookup({
             ...result,
             loading: false,
@@ -956,6 +1020,7 @@ class LiveHearApp {
             y: popY,
           });
         } catch (err: any) {
+          if (seq !== this.lookupSeq) return;
           this.renderSelectionLookup({
             text: selectedText,
             phonetic_or_type: '查词提示',
@@ -985,11 +1050,21 @@ class LiveHearApp {
         !target.closest('#quickLangPopover') &&
         !target.closest('#btnQuickLangPill')
       ) {
-        this.hudState.isQuickLangOpen = false;
-        const qlContainer = document.getElementById('quickLangPopoverContainer');
-        if (qlContainer) qlContainer.innerHTML = '';
+        this.dismissQuickLangPopover();
       }
     });
+  }
+
+  private dismissQuickLangPopover() {
+    this.hudState.isQuickLangOpen = false;
+    const qlContainer = document.getElementById('quickLangPopoverContainer');
+    if (qlContainer) qlContainer.innerHTML = '';
+    if (this.quickLangSnapshot) {
+      this.appConfig.soniox = this.quickLangSnapshot;
+      this.quickLangSnapshot = null;
+      this.refreshTopbarBadges();
+      this.refreshQuickSpeakDock();
+    }
   }
 
   private renderSelectionLookup(data: SelectionLookupData) {
@@ -1000,6 +1075,7 @@ class LiveHearApp {
   }
 
   private closeSelectionLookup() {
+    this.lookupSeq++;
     const container = document.getElementById('selectionLookupContainer');
     if (container) {
       container.innerHTML = '';
@@ -1163,8 +1239,9 @@ class LiveHearApp {
       this.streamManager.updateLastFinalTurn(target, this.hudState.displayMode);
 
       if (!silent && target.translated) {
-        navigator.clipboard.writeText(target.translated);
-        this.showToast(`✅ 已译为 ${speakUpper} 并复制到剪贴板！`);
+        this.showToast(await this.copyText(target.translated)
+          ? `✅ 已译为 ${speakUpper} 并复制到剪贴板！`
+          : `✅ 已译为 ${speakUpper}（复制到剪贴板失败）`);
       }
     } catch (err: any) {
       if (!silent) {
@@ -1175,19 +1252,62 @@ class LiveHearApp {
     }
   }
 
+  /** A stream that ends mid-utterance leaves partial cards that would otherwise pulse forever,
+   *  be skipped by polish/export, and get overwritten by the next session's first partial. */
+  private finalizeDanglingPartials() {
+    const subs = this.hudState.subtitles;
+    for (let i = subs.length - 1; i >= 0; i--) {
+      const item = subs[i];
+      if (!item.isPartial) continue;
+      const original = (item.original || '').trim();
+      if (!original || original === '...') {
+        subs.splice(i, 1);
+        this.streamManager.removeTurnById(item.id);
+        continue;
+      }
+      item.isPartial = false;
+      item.original = original;
+      item.confirmedOriginal = original;
+      item.provisionalOriginal = undefined;
+      if (!item.translated?.trim() || item.translated === '正在同传中...') item.translated = original;
+      item.confirmedTranslated = item.translated;
+      item.provisionalTranslated = undefined;
+      item.rawOriginal = item.rawOriginal || original;
+      this.streamManager.finalizeLastCard(item, this.hudState.displayMode);
+    }
+  }
+
   private applyAsrTranslation(data: { segment_id: string; original: string; translated: string; error?: boolean }) {
-    const idx = this.findSubtitleIndexById(data.segment_id);
+    const targetId = this.translationAliases.get(data.segment_id) ?? data.segment_id;
+    this.translationAliases.delete(data.segment_id);
+    const idx = this.findSubtitleIndexById(targetId);
     const item = idx >= 0 ? this.hudState.subtitles[idx] : null;
-    if (!item || item.isPartial || item.isPolished || item.showingRaw ||
-        item.rawOriginal !== data.original || item.translated !== data.original) return;
+    const sourceText = data.original.trim();
+    // The card may have grown by coalescing since this turn finalized, so the untranslated
+    // source is located as a substring instead of requiring an exact match.
+    if (!item || item.isPolished || item.showingRaw || !sourceText ||
+        !item.translated?.includes(sourceText)) return;
     if (data.error) {
-      item.translationStatus = 'unavailable';
-      this.streamManager.updateLastFinalTurn(item, this.hudState.displayMode);
+      if (!item.isPartial && item.translated.trim() === sourceText) {
+        item.translationStatus = 'unavailable';
+        this.streamManager.updateLastFinalTurn(item, this.hudState.displayMode);
+      }
       return;
     }
+    const translated = data.translated.trim();
+    item.translated = item.translated.replace(sourceText, translated);
+    item.confirmedTranslated = item.confirmedTranslated?.includes(sourceText)
+      ? item.confirmedTranslated.replace(sourceText, translated)
+      : item.translated;
+    // In-flight coalesce bindings captured the untranslated base; keep them in sync so the
+    // next partial/final for this card doesn't resurrect the source text.
+    for (const binding of this.coalesceMap.values()) {
+      if (binding.targetId === item.id && binding.baseTrans.includes(sourceText)) {
+        binding.baseTrans = binding.baseTrans.replace(sourceText, translated);
+      }
+    }
+    if (item.isPartial) return;
     item.translationStatus = undefined;
-    item.translated = data.translated.trim();
-    item.confirmedTranslated = item.translated;
     this.streamManager.updateLastFinalTurn(item, this.hudState.displayMode);
     this.scheduleTurnPolish(item);
   }
@@ -1331,8 +1451,7 @@ class LiveHearApp {
           await tauriInvoke('save_config', { newConfig: this.appConfig });
           this.refreshTopbarBadges();
           if (wasStreaming) {
-            await this.stopLiveStream(false);
-            await this.startLiveStream();
+            await this.restartLiveStream();
           } else {
             this.showToast(next === 'ollama' ? '已选择 Ollama 本地识别' : '已选择 Soniox 识别');
           }
@@ -1408,6 +1527,7 @@ class LiveHearApp {
         break;
 
       case 'closeWindow':
+        this.isClosing = true;
         if (this.hudState.isStreaming) {
           await this.stopLiveStream(true);
         }
@@ -1441,7 +1561,10 @@ class LiveHearApp {
 
       case 'copyText':
         if (payload) {
-          navigator.clipboard.writeText(payload);
+          if (!(await this.copyText(payload))) {
+            this.showToast('⚠️ 复制到剪贴板失败');
+            break;
+          }
           this.showToast('✓ 已复制内容到剪贴板 📋');
 
           // 为触发该动作的按钮添加即时高亮反馈
@@ -1468,18 +1591,20 @@ class LiveHearApp {
         const item = this.hudState.suggestions.find((s) => s.id === payload);
         if (item) {
           const cleanSpoken = item.detail.replace(/\s*[\(（][^\)）]+[\)）]\s*$/, '').trim();
-          navigator.clipboard.writeText(cleanSpoken || item.detail);
-          this.showToast(`✅ 已复制发言词: "${cleanSpoken || item.title}"`);
+          this.showToast(await this.copyText(cleanSpoken || item.detail)
+            ? `✅ 已复制发言词: "${cleanSpoken || item.title}"`
+            : '⚠️ 复制到剪贴板失败');
         }
         break;
 
       case 'toggleQuickLangPopover':
-        this.hudState.isQuickLangOpen = !this.hudState.isQuickLangOpen;
-        const qlContainer = document.getElementById('quickLangPopoverContainer');
-        if (qlContainer) {
-          qlContainer.innerHTML = this.hudState.isQuickLangOpen
-            ? renderQuickLangPopoverHtml(this.appConfig)
-            : '';
+        if (this.hudState.isQuickLangOpen) {
+          this.dismissQuickLangPopover();
+        } else {
+          this.quickLangSnapshot = structuredClone(this.appConfig.soniox);
+          this.hudState.isQuickLangOpen = true;
+          const qlContainer = document.getElementById('quickLangPopoverContainer');
+          if (qlContainer) qlContainer.innerHTML = renderQuickLangPopoverHtml(this.appConfig);
         }
         break;
 
@@ -1579,8 +1704,7 @@ class LiveHearApp {
           this.refreshQuickSpeakDock();
           this.streamManager.refreshDisplayMode(this.hudState.subtitles, this.hudState.displayMode);
           if (restart) {
-            await this.stopLiveStream(false);
-            await this.startLiveStream();
+            await this.restartLiveStream();
           }
           if (!restart || this.hudState.isStreaming) {
             this.showToast(`🗣️ 我方发言/秒译目标外语已切换为: ${next.toUpperCase()}`);
@@ -1689,8 +1813,10 @@ class LiveHearApp {
           };
           this.refreshQuickSpeakDock();
           if (res.spoken) {
-            navigator.clipboard.writeText(res.spoken);
-            this.showToast(`✅ 已秒译为 ${(res.target_lang || speakLang).toUpperCase()} 并自动复制到剪贴板！`);
+            const lang = (res.target_lang || speakLang).toUpperCase();
+            this.showToast(await this.copyText(res.spoken)
+              ? `✅ 已秒译为 ${lang} 并自动复制到剪贴板！`
+              : `✅ 已秒译为 ${lang}（复制到剪贴板失败）`);
           }
         } catch (err: any) {
           if (requestId !== this.quickSpeakRequest) return;
@@ -1761,20 +1887,26 @@ class LiveHearApp {
         this.hudState.isQuickLangOpen = false;
         const qlEl = document.getElementById('quickLangPopoverContainer');
         if (qlEl) qlEl.innerHTML = '';
+        const sonioxBeforeApply = this.quickLangSnapshot;
+        this.quickLangSnapshot = null;
 
         try {
           await tauriInvoke('save_config', { newConfig: this.appConfig });
           this.streamManager.speakTargetLang = this.appConfig.soniox.speak_target_language || 'en';
-        this.refreshTopbarBadges();
-        this.refreshQuickSpeakDock();
+          this.refreshTopbarBadges();
+          this.refreshQuickSpeakDock();
           if (this.hudState.isStreaming) {
-            await this.stopLiveStream(false);
-            await this.startLiveStream();
+            await this.restartLiveStream();
             this.showToast('⚡ 已应用语种配置并热切同传流！');
           } else {
             this.showToast('✅ 语种与目标语言配置已更新');
           }
         } catch (err: any) {
+          if (sonioxBeforeApply) {
+            this.appConfig.soniox = sonioxBeforeApply;
+            this.refreshTopbarBadges();
+            this.refreshQuickSpeakDock();
+          }
           this.showToast(`⚠️ 更新失败: ${err?.message || err}`);
         }
         break;
@@ -1793,12 +1925,15 @@ class LiveHearApp {
             this.appConfig.soniox.custom_terms = [...existing, term];
             try {
               await tauriInvoke('save_config', { newConfig: this.appConfig });
-            } catch {}
+            } catch (err: any) {
+              this.appConfig.soniox.custom_terms = existing;
+              this.showToast(`⚠️ 保存术语失败: ${err?.message || err}`);
+              break;
+            }
           }
           this.closeSelectionLookup();
           if (added && this.hudState.isStreaming && this.appConfig.asr_backend?.provider !== 'ollama') {
-            await this.stopLiveStream(false);
-            await this.startLiveStream();
+            await this.restartLiveStream();
             this.showToast(`✅ 已将「${term}」加入会议术语表并热重载识别流`);
           } else {
             this.showToast(`✅ 已将「${term}」加入会议术语表`);
@@ -1853,6 +1988,10 @@ class LiveHearApp {
               : '已关闭投屏隐身模式'
           );
         } catch (err: any) {
+          // Never leave the UI claiming the window is hidden from screen share when it isn't.
+          this.hudState.isStealthMode = !this.hudState.isStealthMode;
+          stealthBtn?.classList.toggle('active', Boolean(this.hudState.isStealthMode));
+          stealthBtn?.classList.toggle('stealth-active', Boolean(this.hudState.isStealthMode));
           this.showToast(`⚠️ 设置投屏隐身失败: ${err?.message || err}`);
         }
         break;
@@ -1881,6 +2020,9 @@ class LiveHearApp {
               : '已退出鼠标穿透，恢复窗口点击交互'
           );
         } catch (err: any) {
+          this.hudState.isClickThrough = !this.hudState.isClickThrough;
+          ctBtn?.classList.toggle('active', Boolean(this.hudState.isClickThrough));
+          hudWin?.classList.toggle('is-click-through', Boolean(this.hudState.isClickThrough));
           this.showToast(`⚠️ 设置鼠标穿透失败: ${err?.message || err}`);
         }
         break;
@@ -1994,8 +2136,12 @@ class LiveHearApp {
         try {
           const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
           await getCurrentWebviewWindow().setAlwaysOnTop(this.hudState.isAlwaysOnTop);
-        } catch {}
-        this.showToast(this.hudState.isAlwaysOnTop ? '窗口已置顶固定 📌' : '已取消置顶');
+          this.showToast(this.hudState.isAlwaysOnTop ? '窗口已置顶固定 📌' : '已取消置顶');
+        } catch (err: any) {
+          this.hudState.isAlwaysOnTop = !this.hudState.isAlwaysOnTop;
+          pinBtn?.classList.toggle('active', this.hudState.isAlwaysOnTop);
+          this.showToast(`⚠️ 设置置顶失败: ${err?.message || err}`);
+        }
         break;
 
       case 'openPath':
@@ -2049,6 +2195,9 @@ class LiveHearApp {
         break;
 
       case 'saveAllConfig':
+        // The form writes straight into appConfig; restore it if the save fails so the UI
+        // never runs on settings the backend doesn't have.
+        const configBeforeSave = structuredClone(this.appConfig);
         const asrProvider = document.getElementById('cfgAsrProvider') as HTMLSelectElement | null;
         const ollamaUrlInput = document.getElementById('cfgOllamaUrl') as HTMLInputElement | null;
         const ollamaModelInput = document.getElementById('cfgOllamaModel') as HTMLInputElement | null;
@@ -2202,18 +2351,18 @@ class LiveHearApp {
         try {
           await tauriInvoke('save_config', { newConfig: this.appConfig });
           this.streamManager.speakTargetLang = this.appConfig.soniox.speak_target_language || 'en';
-        this.refreshTopbarBadges();
-        this.refreshQuickSpeakDock();
-          this.handleAction('toggleSettings');
+          this.refreshTopbarBadges();
+          this.refreshQuickSpeakDock();
+          if (this.hudState.isSettingsOpen) await this.handleAction('toggleSettings');
 
           if (this.hudState.isStreaming) {
-            await this.stopLiveStream(false);
-            await this.startLiveStream();
+            await this.restartLiveStream();
             this.showToast('✅ 配置已保存并热重载实时同传流！');
           } else {
             this.showToast('✅ 配置已成功保存！');
           }
         } catch (e: any) {
+          this.appConfig = configBeforeSave;
           this.showToast(`⚠️ 保存失败: ${e?.message || e}`);
         }
         break;
@@ -2309,10 +2458,13 @@ class LiveHearApp {
           : `[${s.timestamp}] ${s.speaker}: ${o}`;
       })
       .join('\n');
+    // Closing the window must not hang on a stalled LLM call.
+    const timeoutMs = this.isClosing ? 12000 : 95000;
     try {
-      const summary = await tauriInvoke<string>('generate_ai_minutes', {
-        transcript: rawLines,
-      });
+      const summary = await Promise.race([
+        tauriInvoke<string>('generate_ai_minutes', { transcript: rawLines }),
+        new Promise<string>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
+      ]);
       return summary ? summary.trim() : '';
     } catch (e) {
       console.warn('AI 结构化纪要提炼跳过:', e);
@@ -2456,53 +2608,72 @@ class LiveHearApp {
     }
   }
 
+  private isExporting = false;
+
   private async exportMeetingTranscript() {
     if (this.hudState.subtitles.length === 0) {
       this.showToast('当前暂无字幕记录可导出');
       return;
     }
-
-    this.showToast('✨ 正在提炼 AI 结构化纪要并导出...');
-    const saveDir = this.appConfig.storage?.save_dir || '~/Documents/livehear';
-    const fileFormat = this.appConfig.storage?.file_format || 'txt';
-    const now = new Date();
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-    const filename = `Meeting_${ts}.${fileFormat}`;
-
-    let subtitles: SubtitleItem[];
+    if (this.isExporting) return;
+    this.isExporting = true;
     try {
-      subtitles = await this.snapshotTranscript();
-    } catch (error) {
-      this.showToast(`⚠️ 无法读取完整会议记录，导出已取消: ${error}`);
-      return;
+      this.showToast('✨ 正在提炼 AI 结构化纪要并导出...');
+      const saveDir = this.appConfig.storage?.save_dir || '~/Documents/livehear';
+      const fileFormat = this.appConfig.storage?.file_format || 'txt';
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      const filename = `Meeting_${ts}.${fileFormat}`;
+
+      let subtitles: SubtitleItem[];
+      try {
+        subtitles = await this.snapshotTranscript();
+      } catch (error) {
+        this.showToast(`⚠️ 无法读取完整会议记录，导出已取消: ${error}`);
+        return;
+      }
+      const aiSummary = await this.fetchAiExecutiveSummary(subtitles);
+      const content = fileFormat === 'md'
+        ? this.generateTranscriptMarkdown(aiSummary, subtitles)
+        : this.generateTranscriptText(aiSummary, subtitles);
+
+      try {
+        const savedPath = await tauriInvoke<string>('save_meeting_transcript', {
+          content,
+          filename,
+          saveDir,
+        });
+        const copied = await this.copyText(content);
+        this.showToast(
+          `✅ 纪要已保存至 ${filename}${copied ? ' (已复制)' : ''}`,
+          `<button class="toast-btn-action no-drag" onclick="window.__livehear_action('openPath', '${escapeJs(savedPath)}')">查看</button>`
+        );
+      } catch (e: any) {
+        console.warn('保存会议纪要失败，改为浏览器下载:', e);
+        const mime = fileFormat === 'md' ? 'text/markdown' : 'text/plain';
+        const blob = new Blob([content], { type: `${mime};charset=utf-8;` });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+        const copied = await this.copyText(content);
+        this.showToast(`⚠️ 写入保存目录失败 (${e?.message || e})，已改为下载${copied ? '并复制到剪贴板' : ''}`);
+      }
+    } finally {
+      this.isExporting = false;
     }
-    const aiSummary = await this.fetchAiExecutiveSummary(subtitles);
-    const content = fileFormat === 'md'
-      ? this.generateTranscriptMarkdown(aiSummary, subtitles)
-      : this.generateTranscriptText(aiSummary, subtitles);
+  }
 
+  private async copyText(text: string): Promise<boolean> {
     try {
-      const savedPath = await tauriInvoke<string>('save_meeting_transcript', {
-        content,
-        filename,
-        saveDir,
-      });
-      await navigator.clipboard.writeText(content);
-      this.showToast(
-        `✅ 纪要已保存至 ${filename} (已复制)`,
-        `<button class="toast-btn-action no-drag" onclick="window.__livehear_action('openPath', '${escapeJs(savedPath)}')">查看</button>`
-      );
-    } catch (e: any) {
-      const blob = new Blob([content], { type: 'text/plain;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(url);
-      navigator.clipboard.writeText(content);
-      this.showToast('✅ 会议纪要已成功导出并复制到剪贴板！');
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (err) {
+      console.warn('写入剪贴板失败:', err);
+      return false;
     }
   }
 
@@ -2521,7 +2692,39 @@ class LiveHearApp {
     }
   }
 
-  private async startLiveStream() {
+  // All start/stop/restart work runs through one promise chain so a Stop that is still
+  // draining can't interleave with a Start (or hot-reload) issued meanwhile.
+  private lifecycleChain: Promise<unknown> = Promise.resolve();
+  private pendingStop: Promise<void> | null = null;
+  private isClosing = false;
+
+  private runLifecycle<T>(op: () => Promise<T>): Promise<T> {
+    const next = this.lifecycleChain.then(op, op);
+    this.lifecycleChain = next.catch(() => {});
+    return next;
+  }
+
+  private startLiveStream(): Promise<void> {
+    return this.runLifecycle(() => this.startLiveStreamNow());
+  }
+
+  private stopLiveStream(triggerAutoSave = true): Promise<void> {
+    if (this.pendingStop) return this.pendingStop;
+    const stop = this.runLifecycle(() => this.stopLiveStreamNow(triggerAutoSave));
+    this.pendingStop = stop;
+    const clear = () => { if (this.pendingStop === stop) this.pendingStop = null; };
+    stop.then(clear, clear);
+    return stop;
+  }
+
+  private restartLiveStream(): Promise<void> {
+    return this.runLifecycle(async () => {
+      await this.stopLiveStreamNow(false);
+      await this.startLiveStreamNow();
+    });
+  }
+
+  private async startLiveStreamNow() {
     if (this.isStarting || this.hudState.isStreaming) return;
     this.isStarting = true;
 
@@ -2574,12 +2777,15 @@ class LiveHearApp {
     }
   }
 
-  private async stopLiveStream(triggerAutoSave = true) {
+  private async stopLiveStreamNow(triggerAutoSave = true) {
     if (this.isStopping) return;
     this.isStopping = true;
     let stopWarning = '';
     const stoppingBtn = document.getElementById('btnToggleLive') as HTMLButtonElement | null;
-    if (stoppingBtn) { stoppingBtn.disabled = true; stoppingBtn.textContent = '正在处理尾段…'; }
+    if (stoppingBtn) {
+      stoppingBtn.disabled = true;
+      stoppingBtn.innerHTML = `<span class="live-dot-pulse"></span><span class="live-text">正在处理尾段…</span>`;
+    }
     try {
       await tauriInvoke('stop_soniox_live');
     } catch (error: any) {
@@ -2605,6 +2811,7 @@ class LiveHearApp {
     this.polishTimers.clear();
     this.hudState.isStreaming = false;
     this.coalesceMap.clear();
+    this.finalizeDanglingPartials();
     this.updateMicVolume(0);
     this.updateLatencyBadge(0);
 

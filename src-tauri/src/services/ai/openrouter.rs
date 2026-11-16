@@ -22,6 +22,30 @@ fn parse_model_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, Live
         .map_err(|e| LiveHearError::LlmError(format!("AI 返回的 JSON 无效: {e}")))
 }
 
+/// Keeps the head and tail of very long meetings so the prompt stays within typical context windows.
+fn cap_transcript_for_minutes(transcript: &str) -> std::borrow::Cow<'_, str> {
+    const MAX_CHARS: usize = 60_000;
+    const HEAD_CHARS: usize = 15_000;
+    let total = transcript.chars().count();
+    if total <= MAX_CHARS {
+        return std::borrow::Cow::Borrowed(transcript);
+    }
+    let head_end = transcript
+        .char_indices()
+        .nth(HEAD_CHARS)
+        .map_or(transcript.len(), |(i, _)| i);
+    let tail_start = transcript
+        .char_indices()
+        .nth(total - (MAX_CHARS - HEAD_CHARS))
+        .map_or(transcript.len(), |(i, _)| i);
+    std::borrow::Cow::Owned(format!(
+        "{}\n\n…（中间约 {} 字已省略）…\n\n{}",
+        &transcript[..head_end],
+        total - MAX_CHARS,
+        &transcript[tail_start..]
+    ))
+}
+
 pub fn shared_http_client() -> Client {
     SHARED_HTTP_CLIENT
         .get_or_init(|| {
@@ -712,6 +736,7 @@ impl OpenRouterAdapter {
         if api_key.is_empty() {
             return Err(LiveHearError::ConfigError("API Key 未配置".to_string()));
         }
+        let full_transcript = cap_transcript_for_minutes(full_transcript);
 
         let prompt = format!(
             "你是一个专业的跨国会议首席纪要官。请根据以下会议背景与实时同传记录，提炼一份结构清晰、精炼高价值的中文会议高管纪要（Executive Summary）。\n\
@@ -740,7 +765,7 @@ impl OpenRouterAdapter {
                 content: prompt,
             }],
             temperature: Some(0.25),
-            max_tokens: Some(900),
+            max_tokens: Some(2000),
         };
 
         let url = format!(
@@ -750,6 +775,8 @@ impl OpenRouterAdapter {
         let res = self
             .client
             .post(&url)
+            // Whole-meeting summaries routinely exceed the shared client's 18s budget.
+            .timeout(std::time::Duration::from_secs(90))
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&payload)
             .send()

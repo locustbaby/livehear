@@ -18,6 +18,7 @@ function harness() {
   let input = { value: '' };
   const dock = { set innerHTML(value) { input = { value: '' }; } };
   const context = {
+    structuredClone,
     exports: {}, console: {log() {}, warn() {}, error() {}}, setTimeout, clearTimeout,
     window: {
       __TAURI_INTERNALS__: {},
@@ -146,8 +147,8 @@ for (const mode of ['two_way', 'one_way']) test(`cycling the speak language sync
   h.app.appConfig.soniox.translation_type = mode;
   h.app.hudState.isStreaming = true;
   const lifecycle = [];
-  h.app.stopLiveStream = async save => { lifecycle.push(['stop', save]); h.app.hudState.isStreaming = false; };
-  h.app.startLiveStream = async () => { lifecycle.push(['start']); h.app.hudState.isStreaming = true; };
+  h.app.stopLiveStreamNow = async save => { lifecycle.push(['stop', save]); h.app.hudState.isStreaming = false; };
+  h.app.startLiveStreamNow = async () => { lifecycle.push(['start']); h.app.hudState.isStreaming = true; };
   await h.app.handleAction('cycleSpeakTargetLang');
   assert.equal(h.app.appConfig.soniox.speak_target_language, 'ja');
   assert.deepEqual(lifecycle, mode === 'two_way' ? [['stop', false], ['start']] : []);
@@ -202,7 +203,7 @@ test('failed language persistence leaves the active stream and selected language
   h.app.hudState.isStreaming = true;
   h.overrides.set('save_config', async () => { throw Error('disk full'); });
   let stopped = false;
-  h.app.stopLiveStream = async () => { stopped = true; };
+  h.app.stopLiveStreamNow = async () => { stopped = true; };
   await h.app.handleAction('cycleSpeakTargetLang');
   assert.equal(h.app.appConfig.soniox.speak_target_language, 'en');
   assert.equal(stopped, false);
@@ -386,4 +387,55 @@ test('formatShortcut adapts macOS symbols to Ctrl on Windows and keeps macOS int
   assert.equal(h.hud.formatShortcut('⌘ + Shift + H', 'windows'), 'Ctrl + Shift + H');
   assert.equal(h.hud.formatShortcut('Cmd+1', 'windows'), 'Ctrl+1');
   assert.equal(h.hud.formatShortcut('⌘ + K', 'macos'), '⌘ + K');
+});
+
+test('async translations reach sentences that were coalesced into an earlier card', async () => {
+  const h = harness();
+  h.app.appConfig.openrouter.enable_polish = false;
+  await h.init();
+  const final = (id, text) => h.listeners.get('asr-final')({payload: {segment: {
+    id, text, translated_text: '', translation_status: 'pending', detected_language: 'ja',
+    speaker: {id: 3, display_name: 'Speaker 3'},
+  }}});
+  const translation = (segment_id, original, translated) =>
+    h.listeners.get('asr-translation')({payload: {segment_id, original, translated}});
+  final('a', 'こんにちは');
+  final('b', '明日会議です');
+  assert.equal(h.app.hudState.subtitles.length, 1);
+  translation('b', '明日会議です', '明天开会');
+  translation('a', 'こんにちは', '你好');
+  const card = h.app.hudState.subtitles[0];
+  assert.ok(card.translated.includes('明天开会'), card.translated);
+  assert.ok(card.translated.includes('你好'), card.translated);
+  assert.ok(!card.translated.includes('こんにちは'));
+});
+
+test('dismissing the quick-lang popover discards unapplied edits', async () => {
+  const h = harness();
+  const before = [...h.app.appConfig.soniox.language_hints];
+  await h.app.handleAction('toggleQuickLangPopover');
+  await h.app.handleAction('selectLangPreset', 'ja,ko');
+  assert.deepEqual([...h.app.appConfig.soniox.language_hints], ['ja', 'ko']);
+  await h.app.handleAction('toggleQuickLangPopover');
+  assert.deepEqual([...h.app.appConfig.soniox.language_hints], before);
+  assert.equal(h.calls.filter(c => c.cmd === 'save_config').length, 0);
+});
+
+test('a start issued while a stop is draining runs after the stop instead of being dropped', async () => {
+  const h = harness();
+  h.app.hudState.isStreaming = true;
+  const order = [];
+  let finishStop;
+  h.app.stopLiveStreamNow = () => new Promise(resolve => {
+    order.push('stop');
+    finishStop = () => { h.app.hudState.isStreaming = false; resolve(); };
+  });
+  h.app.startLiveStreamNow = async () => { order.push(h.app.hudState.isStreaming ? 'start-skipped' : 'start'); };
+  const stop = h.app.stopLiveStream();
+  const start = h.app.startLiveStream();
+  await tick();
+  assert.deepEqual(order, ['stop']);
+  finishStop();
+  await Promise.all([stop, start]);
+  assert.deepEqual(order, ['stop', 'start']);
 });

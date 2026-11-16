@@ -1,5 +1,6 @@
 /* LiveHear Unified Design Tokens */
 :root {
+  color-scheme: dark;
   /* Common Palette */
   --color-primary: #007aff;
   --color-primary-hover: #0062cc;
@@ -17,6 +18,7 @@
 /* ==========================================================================
    macOS Apple HIG Theme Definition
    ========================================================================== */
+:root,
 [data-platform="macos"] {
   --font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", sans-serif;
   --font-mono: "SF Mono", Menlo, Monaco, Courier, monospace;
@@ -46,7 +48,7 @@
   /* Typography Colors */
   --text-primary: rgba(255, 255, 255, 0.94);
   --text-secondary: rgba(255, 255, 255, 0.60);
-  --text-tertiary: rgba(255, 255, 255, 0.38);
+  --text-tertiary: rgba(255, 255, 255, 0.5);
   --text-accent: #388bfd;
 }
 
@@ -82,6 +84,6 @@
   /* Typography Colors */
   --text-primary: #ffffff;
   --text-secondary: #a6a6a6;
-  --text-tertiary: #6e6e6e;
+  --text-tertiary: #8a8a8a;
   --text-accent: #60cdff;
 }

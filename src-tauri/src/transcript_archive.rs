@@ -71,12 +71,45 @@ impl TranscriptArchive {
     }
 }
 
-impl Drop for TranscriptArchive {
-    fn drop(&mut self) {
+impl TranscriptArchive {
+    /// Tauri exits via `process::exit`, which skips `Drop` for managed state, so the
+    /// exit handler calls this explicitly.
+    pub fn discard(&mut self) {
         if let Some((path, file)) = self.file.take() {
             drop(file);
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    /// Removes archives left behind by crashed or force-killed sessions. The age gate
+    /// keeps a concurrently running second instance's live archive intact.
+    pub fn sweep_stale() {
+        const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !(name.starts_with("livehear-transcript-") && name.ends_with(".jsonl")) {
+                continue;
+            }
+            let stale = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > STALE_AFTER);
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+impl Drop for TranscriptArchive {
+    fn drop(&mut self) {
+        self.discard();
     }
 }
 

@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SonioxConfig {
     pub api_key: String,
     pub ws_url: String,
@@ -125,6 +126,7 @@ impl Default for SonioxConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OpenRouterConfig {
     pub api_key: String,
     pub base_url: String,
@@ -151,6 +153,7 @@ impl Default for OpenRouterConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct JevConfig {
     pub enabled: bool,
     pub api_key: String,
@@ -172,6 +175,7 @@ impl Default for JevConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MeetingConfig {
     pub auto_predict: bool,
     pub context: String,
@@ -187,6 +191,7 @@ impl Default for MeetingConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StorageConfig {
     #[serde(default = "default_auto_save")]
     pub auto_save: bool,
@@ -237,6 +242,7 @@ impl Default for AsrBackendConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct AppConfig {
     #[serde(default)]
     pub asr_backend: AsrBackendConfig,
@@ -289,8 +295,22 @@ impl AppConfig {
 
     pub fn load() -> Self {
         let path = Self::config_path();
-        if let Some(c) = Self::read(&path) {
-            return c;
+        if path.exists() {
+            if let Some(c) = Self::read(&path) {
+                return c;
+            }
+            // Never overwrite a config we failed to parse: it holds the user's API keys.
+            let backup = path.with_extension("json.bak");
+            match fs::rename(&path, &backup) {
+                Ok(()) => eprintln!("⚠️ [LiveHear] 无法解析的配置已备份到 {}", backup.display()),
+                Err(e) => {
+                    eprintln!(
+                        "⚠️ [LiveHear] 备份损坏配置失败，本次使用默认配置且不写盘: {}",
+                        e
+                    );
+                    return Self::default();
+                }
+            }
         }
         let seeded = Self::legacy_candidates()
             .iter()
@@ -303,34 +323,43 @@ impl AppConfig {
         seeded
     }
 
-    /// 保存配置到指定路径
+    /// 原子写入：先写同目录临时文件并 fsync，再 rename 覆盖，避免崩溃/断电留下空文件。
     pub fn save_to(&self, path: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
             && !parent.exists()
         {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
         }
         let content =
             serde_json::to_string_pretty(self).map_err(|e| format!("序列化配置失败: {}", e))?;
+        let tmp = path.with_extension("json.tmp");
         let mut options = fs::OpenOptions::new();
-        options.write(true).create(true);
+        options.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options
-            .open(path)
-            .map_err(|e| format!("打开配置文件失败: {}", e))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("设置配置文件权限失败: {}", e))?;
+        let write_result = (|| -> Result<(), String> {
+            let mut file = options
+                .open(&tmp)
+                .map_err(|e| format!("打开配置文件失败: {}", e))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(fs::Permissions::from_mode(0o600))
+                    .map_err(|e| format!("设置配置文件权限失败: {}", e))?;
+            }
+            file.write_all(content.as_bytes())
+                .and_then(|_| file.sync_all())
+                .map_err(|e| format!("写入配置文件失败: {}", e))?;
+            fs::rename(&tmp, path).map_err(|e| format!("替换配置文件失败: {}", e))
+        })();
+        if write_result.is_err() {
+            let _ = fs::remove_file(&tmp);
         }
-        file.set_len(0)
-            .and_then(|_| file.write_all(content.as_bytes()))
-            .map_err(|e| format!("写入配置文件失败: {}", e))
+        write_result
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -339,7 +368,9 @@ impl AppConfig {
 }
 
 fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -370,5 +401,17 @@ mod tests {
             );
         }
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn partial_config_fills_missing_sections_with_defaults() {
+        let parsed: AppConfig =
+            serde_json::from_str(r#"{"soniox":{"api_key":"k"},"openrouter":{"api_key":"o"}}"#)
+                .unwrap();
+        assert_eq!(parsed.soniox.api_key, "k");
+        assert_eq!(parsed.soniox.sample_rate, 16000);
+        assert_eq!(parsed.openrouter.api_key, "o");
+        assert_eq!(parsed.jev.model, JevConfig::default().model);
+        assert!(parsed.meeting.auto_predict);
     }
 }

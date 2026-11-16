@@ -14,6 +14,8 @@ use tokio_tungstenite::tungstenite::http::{HeaderValue, header::AUTHORIZATION};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
+const SONIOX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SonioxTranslationPayload {
     #[serde(rename = "type")]
@@ -744,9 +746,13 @@ impl ASRService for SonioxLiveAdapter {
             .map_err(|e| LiveHearError::ConfigError(format!("无效 API Key: {}", e)))?;
         request.headers_mut().insert(AUTHORIZATION, auth);
 
-        let (mut ws_stream, _) = connect_async(request)
-            .await
-            .map_err(|e| LiveHearError::NetworkError(format!("连接 Soniox 失败: {}", e)))?;
+        let (mut ws_stream, _) =
+            tokio::time::timeout(SONIOX_CONNECT_TIMEOUT, connect_async(request))
+                .await
+                .map_err(|_| {
+                    LiveHearError::NetworkError("连接 Soniox 超时，请检查网络/代理".into())
+                })?
+                .map_err(|e| LiveHearError::NetworkError(format!("连接 Soniox 失败: {}", e)))?;
 
         let init_payload = self.build_start_payload();
         let json = serde_json::to_string(&init_payload)
@@ -760,7 +766,8 @@ impl ASRService for SonioxLiveAdapter {
         // 发送空音频帧触发握手校验
         let _ = ws_stream.send(Message::Binary(vec![].into())).await;
 
-        if let Some(Ok(Message::Text(resp_text))) = ws_stream.next().await
+        if let Ok(Some(Ok(Message::Text(resp_text)))) =
+            tokio::time::timeout(SONIOX_CONNECT_TIMEOUT, ws_stream.next()).await
             && let Ok(resp) = serde_json::from_str::<SonioxStreamResponse>(&resp_text)
             && let Some(err) = resp.error_message
         {
@@ -800,9 +807,14 @@ impl ASRService for SonioxLiveAdapter {
             .map_err(|e| LiveHearError::ConfigError(format!("无效 API Key: {}", e)))?;
         request.headers_mut().insert(AUTHORIZATION, auth);
 
-        let (ws_stream, _) = connect_async(request).await.map_err(|e| {
-            LiveHearError::NetworkError(format!("连接 Soniox WebSocket 失败: {}", e))
-        })?;
+        let (ws_stream, _) = tokio::time::timeout(SONIOX_CONNECT_TIMEOUT, connect_async(request))
+            .await
+            .map_err(|_| {
+                LiveHearError::NetworkError("连接 Soniox WebSocket 超时，请检查网络/代理".into())
+            })?
+            .map_err(|e| {
+                LiveHearError::NetworkError(format!("连接 Soniox WebSocket 失败: {}", e))
+            })?;
 
         let (mut write, mut read) = ws_stream.split();
 

@@ -13,6 +13,9 @@ pub struct AppContainer {
     pub config: RwLock<AppConfig>,
     pub transcript_archive: tokio::sync::Mutex<crate::transcript_archive::TranscriptArchive>,
     pub orchestrator: RwLock<Option<Arc<LiveHearOrchestrator>>>,
+    /// Serializes start/stop so the slow drain/connect work never runs under the
+    /// `orchestrator` lock that `push_audio` and friends need.
+    pub lifecycle: tokio::sync::Mutex<()>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -138,8 +141,9 @@ pub async fn start_soniox_live(
     app: AppHandle,
     container: State<'_, Arc<AppContainer>>,
 ) -> Result<(), String> {
-    let mut orchestrator_slot = container.orchestrator.write().await;
-    if let Some(old_orch) = orchestrator_slot.take()
+    let _lifecycle = container.lifecycle.lock().await;
+    let old = container.orchestrator.write().await.take();
+    if let Some(old_orch) = old
         && !old_orch.stop().await
     {
         return Err("本地识别收尾超时，部分字幕可能未完成".into());
@@ -178,21 +182,19 @@ pub async fn start_soniox_live(
 
     orchestrator.start(app).await.map_err(|e| e.to_string())?;
 
-    *orchestrator_slot = Some(orchestrator);
+    *container.orchestrator.write().await = Some(orchestrator);
 
     Ok(())
 }
 
 #[tauri::command]
 pub async fn stop_soniox_live(container: State<'_, Arc<AppContainer>>) -> Result<(), String> {
-    let mut lock = container.orchestrator.write().await;
-    if let Some(orch) = lock.as_ref() {
-        let complete = orch.stop().await;
-        *lock = None;
-        if !complete {
-            return Err("本地识别收尾超时，部分字幕可能未完成".into());
-        }
-        return Ok(());
+    let _lifecycle = container.lifecycle.lock().await;
+    let current = container.orchestrator.write().await.take();
+    if let Some(orch) = current
+        && !orch.stop().await
+    {
+        return Err("本地识别收尾超时，部分字幕可能未完成".into());
     }
     Ok(())
 }
@@ -281,8 +283,14 @@ pub async fn save_meeting_transcript(
         )
     });
 
+    if !is_plain_file_name(&fname) {
+        return Err(format!("非法文件名: {}", fname));
+    }
     let target_file = resolved_dir.join(&fname);
-    std::fs::write(&target_file, content.as_bytes())
+    let write_path = target_file.clone();
+    tokio::task::spawn_blocking(move || std::fs::write(&write_path, content.as_bytes()))
+        .await
+        .map_err(|e| format!("写入任务失败: {}", e))?
         .map_err(|e| format!("写入文件失败 ({}): {}", target_file.display(), e))?;
 
     println!(
@@ -524,6 +532,18 @@ pub async fn generate_ai_minutes(
         .map_err(|e| e.to_string())
 }
 
+/// Only a bare file name is accepted: the webview must not be able to escape the save dir.
+fn is_plain_file_name(name: &str) -> bool {
+    const RESERVED: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name
+            .chars()
+            .any(|c| RESERVED.contains(&c) || c.is_control())
+        && std::path::Path::new(name).file_name() == Some(std::ffi::OsStr::new(name))
+}
+
 fn resolve_dir_path(path_str: &str) -> std::path::PathBuf {
     let trimmed = path_str.trim();
     if trimmed.starts_with("~/") || trimmed == "~" {
@@ -538,4 +558,27 @@ fn resolve_dir_path(path_str: &str) -> std::path::PathBuf {
         }
     }
     std::path::PathBuf::from(trimmed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_plain_file_name;
+
+    #[test]
+    fn transcript_file_names_cannot_escape_the_save_dir() {
+        assert!(is_plain_file_name("Meeting_20261116_101500.md"));
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../evil.txt",
+            "sub/dir.txt",
+            "..\\evil.bat",
+            "C:\\Users\\x\\Startup\\a.bat",
+            "/etc/passwd",
+            "a:b.txt",
+        ] {
+            assert!(!is_plain_file_name(bad), "{bad:?} should be rejected");
+        }
+    }
 }
