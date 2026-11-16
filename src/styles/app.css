@@ -132,6 +132,12 @@ button, input, select, textarea, .no-drag {
   padding-left: 6px;
 }
 
+.topbar-mic-slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* 实时同传状态开关胶囊大按钮 */
 .live-status-pill {
   display: inline-flex;
@@ -1216,6 +1222,10 @@ button, input, select, textarea, .no-drag {
   gap: 10px;
   animation: popIn 0.16s cubic-bezier(0.16, 1, 0.3, 1);
 }
+[data-platform="windows"] .quick-lang-popover,
+[data-platform="linux"] .quick-lang-popover {
+  left: 14px;
+}
 
 .ql-header {
   display: flex;
@@ -1907,3 +1917,21 @@ button, input, select, textarea, .no-drag {
 
 .raw-transcript { margin-top: 8px; color: var(--color-text-secondary, #b9c0ce); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .raw-transcript summary { cursor: pointer; }
+
+.win-window-controls {
+  display: none;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  padding-left: 6px;
+  border-left: var(--border-subtle);
+}
+[data-platform="windows"] .win-window-controls,
+[data-platform="linux"] .win-window-controls {
+  display: inline-flex;
+}
+.win-ctrl-btn.close-btn:hover {
+  background: rgba(239, 68, 68, 0.85);
+  border-color: rgba(248, 113, 113, 0.9);
+  color: #ffffff;
+}

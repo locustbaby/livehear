@@ -106,13 +106,51 @@ export function formatTopbarLangBadgeText(config?: FullAppConfig): string {
   return `[${hints}${strictIcon}] 听:${targetName} · 说:${speakCode} ▾`;
 }
 
+export function formatShortcut(text: string, platform?: string): string {
+  const p =
+    platform ||
+    (typeof document !== 'undefined'
+      ? document.documentElement.getAttribute('data-platform')
+      : '') ||
+    '';
+  const isNonMac = p === 'windows' || p === 'linux';
+  if (!isNonMac) return text;
+  return text.replace(/⌘/g, 'Ctrl').replace(/\bCmd\+/g, 'Ctrl+');
+}
+
+export function renderTopbarMicStatusHtml(state: HudState): string {
+  const isMicHealthy = state.hasMicPermission && state.micVolume > 0;
+  if (!state.hasMicPermission) {
+    return `
+      <button class="permission-pill no-drag warning"
+              id="btnRequestMic"
+              title="点击授权麦克风权限"
+              onclick="window.__livehear_action('requestMicPermission')">
+        ⚠️ 麦克风未授权 (点击授权)
+      </button>
+    `;
+  }
+  return `
+    <div class="track-indicator ${isMicHealthy ? 'active' : ''}"
+         id="micIndicator"
+         title="麦克风实时输入音量: ${state.micVolume}%">
+      <span class="track-dot ${state.micVolume > 3 ? 'pulse-green' : 'active'}"></span>
+      <span id="micVolumeText">麦克风: ${state.micVolume}%</span>
+    </div>
+    <div class="wave-visualizer ${state.micVolume > 3 ? 'animating' : ''}" id="micWaveVisualizer" title="输入音量: ${state.micVolume}%">
+      <span class="bar bar-1"></span>
+      <span class="bar bar-2"></span>
+      <span class="bar bar-3"></span>
+      <span class="bar bar-4"></span>
+    </div>
+  `;
+}
+
 export function renderHudView(
   state: HudState,
   config?: FullAppConfig,
   _onAction?: (action: string, payload?: any) => void
 ): string {
-  const isMicHealthy = state.hasMicPermission && state.micVolume > 0;
-
   return `
     <div class="hud-window ${state.isClickThrough ? 'is-click-through' : ''}" data-tauri-drag-region>
       <!-- 顶部轻量拖拽把手区 (按住可自由拖动浮窗) -->
@@ -131,31 +169,7 @@ export function renderHudView(
           </button>
 
           <!-- 麦克风权限与音量实时监测 -->
-          ${
-            !state.hasMicPermission
-              ? `
-            <button class="permission-pill no-drag warning" 
-                    id="btnRequestMic"
-                    title="点击授权麦克风权限"
-                    onclick="window.__livehear_action('requestMicPermission')">
-              ⚠️ 麦克风未授权 (点击授权)
-            </button>
-          `
-              : `
-            <div class="track-indicator ${isMicHealthy ? 'active' : ''}" 
-                 id="micIndicator"
-                 title="麦克风实时输入音量: ${state.micVolume}%">
-              <span class="track-dot ${state.micVolume > 3 ? 'pulse-green' : 'active'}"></span>
-              <span id="micVolumeText">麦克风: ${state.micVolume}%</span>
-            </div>
-            <div class="wave-visualizer ${state.micVolume > 3 ? 'animating' : ''}" id="micWaveVisualizer" title="输入音量: ${state.micVolume}%">
-              <span class="bar bar-1"></span>
-              <span class="bar bar-2"></span>
-              <span class="bar bar-3"></span>
-              <span class="bar bar-4"></span>
-            </div>
-          `
-          }
+          <span class="topbar-mic-slot" id="topbarMicSlot">${renderTopbarMicStatusHtml(state)}</span>
 
           <!-- 语种范围与目标语言快捷切换胶囊 (点击弹出快捷面板) -->
           <button class="lang-auto-badge no-drag interactive-lang-pill"
@@ -234,7 +248,7 @@ export function renderHudView(
           <!-- 一键发言提词 / 帮我接话按钮 -->
           <button class="copilot-trigger-pill no-drag ${state.hasPredictSuggestion ? 'active' : ''}"
                   id="btnOpenCopilot"
-                  title="根据上文快速生成我方发言提词与回应建议 (快捷键: ⌘+K)"
+                  title="${formatShortcut('根据上文快速生成我方发言提词与回应建议 (快捷键: ⌘+K)')}"
                   onclick="window.__livehear_action('openCopilotDrawer')">
             <span>💡</span>
             <span>帮我接话</span>
@@ -243,7 +257,7 @@ export function renderHudView(
           <!-- 投屏隐身防录屏模式 (Stealth Mode) -->
           <button class="icon-btn no-drag ${state.isStealthMode ? 'active stealth-active' : ''}"
                   id="btnToggleStealth"
-                  title="${state.isStealthMode ? '投屏隐身已开启：共享屏幕/截图时此窗口完全隐形 (⌘+Shift+H)' : '点击开启投屏隐身：Zoom/腾讯会议/飞书共享屏幕时隐藏此浮窗 (⌘+Shift+H)'}"
+                  title="${formatShortcut(state.isStealthMode ? '投屏隐身已开启：共享屏幕/截图时此窗口完全隐形 (⌘+Shift+H)' : '点击开启投屏隐身：Zoom/腾讯会议/飞书共享屏幕时隐藏此浮窗 (⌘+Shift+H)')}"
                   onclick="window.__livehear_action('toggleStealthMode')">
             🕶️
           </button>
@@ -251,7 +265,7 @@ export function renderHudView(
           <!-- 鼠标穿透模式 (Click-Through) -->
           <button class="icon-btn no-drag ${state.isClickThrough ? 'active' : ''}"
                   id="btnToggleClickThrough"
-                  title="${state.isClickThrough ? '鼠标穿透已开启 (按 ⌘+Shift+X 恢复点击)' : '点击开启鼠标穿透：不遮挡底层软件点击 (⌘+Shift+X)'}"
+                  title="${formatShortcut(state.isClickThrough ? '鼠标穿透已开启 (按 ⌘+Shift+X 恢复点击)' : '点击开启鼠标穿透：不遮挡底层软件点击 (⌘+Shift+X)')}"
                   onclick="window.__livehear_action('toggleClickThrough')">
             👻
           </button>
@@ -279,6 +293,19 @@ export function renderHudView(
                   onclick="window.__livehear_action('toggleSettings')">
             ⚙️
           </button>
+
+          <div class="win-window-controls no-drag">
+            <button class="icon-btn win-ctrl-btn no-drag"
+                    title="最小化窗口"
+                    onclick="window.__livehear_action('minimizeWindow')">
+              ─
+            </button>
+            <button class="icon-btn win-ctrl-btn close-btn no-drag"
+                    title="关闭窗口"
+                    onclick="window.__livehear_action('closeWindow')">
+              ✕
+            </button>
+          </div>
         </div>
       </div>
 
@@ -745,7 +772,7 @@ export function renderSuggestionsHtml(
             <div class="suggestion-card no-drag" onclick="window.__livehear_action('copySuggestion', ${sug.id})">
               <div class="suggestion-meta">
                 <span class="strategy-badge">${escapeHtml(sug.title)}</span>
-                <span class="shortcut-tag">${sug.shortcut} · 点击复制英文</span>
+                <span class="shortcut-tag">${escapeHtml(formatShortcut(sug.shortcut))} · 点击复制英文</span>
               </div>
               <div class="suggestion-detail">${escapeHtml(mainText)}</div>
               ${subNote ? `<div class="suggestion-subnote">💬 ${escapeHtml(subNote)}</div>` : ''}
@@ -821,7 +848,7 @@ export function renderQuickSpeakDockHtml(state: HudState, config?: FullAppConfig
         <input type="text"
                id="quickSpeakInput"
                class="qs-input no-drag"
-               placeholder="快捷辅助 Speak：输入中文回车秒译 ${escapeHtml(speakUpper)} 口语，点『3种建议』生成多角度提词 (⌘+K)..."
+               placeholder="${formatShortcut(`快捷辅助 Speak：输入中文回车秒译 ${escapeHtml(speakUpper)} 口语，点『3种建议』生成多角度提词 (⌘+K)...`)}"
                onkeydown="if(event.key === 'Enter' && event.shiftKey) { event.preventDefault(); window.__livehear_action('submitQuickSpeakSuggestions'); } else if(event.key === 'Enter') { event.preventDefault(); window.__livehear_action('submitQuickSpeakTranslate'); }" />
         <button class="qs-btn primary no-drag"
                 title="将输入的中文极速翻译为地道 ${escapeHtml(speakUpper)} 口语并自动复制 (Enter)"
@@ -1273,13 +1300,13 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
           <div class="setting-group">
             <label>全局快捷键</label>
             <div class="shortcuts-guide-card">
-              <div class="shortcut-item"><span>⌘ + K</span><span>一键唤起「帮我接话」发言提词 / 浓缩前文</span></div>
-              <div class="shortcut-item"><span>⌘ + Shift + H</span><span>投屏隐身防录屏模式 (共享桌面时隐藏此窗)</span></div>
-              <div class="shortcut-item"><span>⌘ + Shift + X</span><span>开启 / 关闭鼠标穿透幽灵模式</span></div>
-              <div class="shortcut-item"><span>⌘ + Shift + P</span><span>窗口置顶固定 / 取消置顶</span></div>
-              <div class="shortcut-item"><span>⌘ + Shift + C</span><span>一键清空当前字幕流</span></div>
-              <div class="shortcut-item"><span>⌘ + Shift + E</span><span>一键导出 AI 结构化会议纪要</span></div>
-              <div class="shortcut-item"><span>⌘ + 1 / 2 / 3</span><span>快速复制第 1 / 2 / 3 条提词或回复</span></div>
+              <div class="shortcut-item"><span>${formatShortcut('⌘ + K')}</span><span>一键唤起「帮我接话」发言提词 / 浓缩前文</span></div>
+              <div class="shortcut-item"><span>${formatShortcut('⌘ + Shift + H')}</span><span>投屏隐身防录屏模式 (共享桌面时隐藏此窗)</span></div>
+              <div class="shortcut-item"><span>${formatShortcut('⌘ + Shift + X')}</span><span>开启 / 关闭鼠标穿透幽灵模式</span></div>
+              <div class="shortcut-item"><span>${formatShortcut('⌘ + Shift + P')}</span><span>窗口置顶固定 / 取消置顶</span></div>
+              <div class="shortcut-item"><span>${formatShortcut('⌘ + Shift + C')}</span><span>一键清空当前字幕流</span></div>
+              <div class="shortcut-item"><span>${formatShortcut('⌘ + Shift + E')}</span><span>一键导出 AI 结构化会议纪要</span></div>
+              <div class="shortcut-item"><span>${formatShortcut('⌘ + 1 / 2 / 3')}</span><span>快速复制第 1 / 2 / 3 条提词或回复</span></div>
             </div>
           </div>
         </div>

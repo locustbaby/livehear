@@ -75,11 +75,72 @@ jobs:
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/msi/*.msi
 
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install Rust Stable (Universal macOS Targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Frontend Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test Frontend State and Export
+        run: pnpm test
+
+      - name: Build Frontend Bundle
+        run: pnpm build
+
+      - name: Test Rust Services
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Build Tauri macOS Universal App (.dmg & .app)
+        run: pnpm tauri build --target universal-apple-darwin
+
+      - name: Archive macOS .app Bundle
+        run: ditto -c -k --sequesterRsrc --keepParent src-tauri/target/universal-apple-darwin/release/bundle/macos/LiveHear.app src-tauri/target/universal-apple-darwin/release/bundle/macos/LiveHear_0.1.0_universal.app.zip
+
+      - name: Upload macOS Installers Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveHear-macOS-Installers
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/LiveHear_0.1.0_universal.app.zip
+
+  release:
+    needs: [build-windows, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Platform Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
       - name: Create GitHub Release for Version Tags
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi
+          files: release-assets/*
           generate_release_notes: true

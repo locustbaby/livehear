@@ -29,6 +29,10 @@ pub fn run() {
                 transcript_archive: tokio::sync::Mutex::new(Default::default()),
                 orchestrator: RwLock::new(None),
             }));
+            #[cfg(not(target_os = "macos"))]
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_decorations(false);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -46,6 +50,9 @@ pub fn run() {
             commands::simulate_test_speech,
             commands::save_meeting_transcript,
             commands::open_path_in_finder,
+            commands::open_mic_privacy_settings,
+            commands::minimize_window,
+            commands::close_window,
             commands::polish_transcript,
             commands::lookup_selection,
             commands::generate_copilot_prompts,

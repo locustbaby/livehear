@@ -36,6 +36,7 @@ function harness() {
     },
     navigator: { clipboard: { writeText: async text => clipboard.push(text) } },
   };
+  let loadedHud = null;
   context.require = name => {
     if (name === '@tauri-apps/api/event') return { listen: async (event, handler) => listeners.set(event, handler) };
     if (name === './components/hud') {
@@ -45,6 +46,7 @@ function harness() {
         ts.transpileModule(hudSource, {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020}}).outputText,
         vm.createContext({ exports: hudExports, module: { exports: hudExports } })
       );
+      loadedHud = hudExports;
       return { ...hudExports, renderQuickSpeakDockHtml: () => '' };
     }
     if (name === '@tauri-apps/api/core') return { invoke: async (cmd, args) => {
@@ -70,6 +72,7 @@ function harness() {
   app.refreshTopbarBadges = () => {};
   for (const name of ['finalizeLastCard', 'updateOrAppendPartial', 'refreshDisplayMode', 'updateLastFinalTurn', 'clear']) app.streamManager[name] = () => {};
   return { app, calls, requests, clipboard, listeners, windowListeners, elements, overrides, context,
+    hud: loadedHud,
     init: () => initListeners.call(app),
     bindKeyboardShortcuts: () => bindShortcuts.call(app),
     input: value => value === undefined ? input.value : (input.value = value),
@@ -357,4 +360,30 @@ test('click-through mode restores interaction on Escape or window blur then focu
   assert.equal(h.app.hudState.isClickThrough, false);
   const ctCalls = h.calls.filter(c => c.cmd === 'set_click_through').map(c => c.args.enabled);
   assert.deepEqual(ctCalls, [true, false, true, false]);
+});
+
+test('mic permission failure updates state and requestMicPermission opens system privacy settings', async () => {
+  const h = harness();
+  h.overrides.set('start_soniox_live', async () => {
+    throw new Error('麦克风启动失败: Access denied');
+  });
+  await h.app.startLiveStream();
+  assert.equal(h.app.hudState.hasMicPermission, false);
+  assert.ok(h.app.hudState.permissionError.includes('Access denied'));
+
+  await h.app.handleAction('requestMicPermission');
+  assert.equal(h.calls.filter(c => c.cmd === 'open_mic_privacy_settings').length, 1);
+
+  h.overrides.set('start_soniox_live', async () => {});
+  await h.app.startLiveStream();
+  assert.equal(h.app.hudState.hasMicPermission, true);
+  assert.equal(h.app.hudState.permissionError, undefined);
+});
+
+test('formatShortcut adapts macOS symbols to Ctrl on Windows and keeps macOS intact', () => {
+  const h = harness();
+  assert.equal(h.hud.formatShortcut('⌘ + K', 'windows'), 'Ctrl + K');
+  assert.equal(h.hud.formatShortcut('⌘ + Shift + H', 'windows'), 'Ctrl + Shift + H');
+  assert.equal(h.hud.formatShortcut('Cmd+1', 'windows'), 'Ctrl+1');
+  assert.equal(h.hud.formatShortcut('⌘ + K', 'macos'), '⌘ + K');
 });

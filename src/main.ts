@@ -1,5 +1,6 @@
 import {
   renderHudView,
+  renderTopbarMicStatusHtml,
   renderSubtitleTurnHtml,
   renderEmptyPlaceholder,
   renderSuggestionsHtml,
@@ -8,6 +9,7 @@ import {
   renderQuickSpeakDockHtml,
   renderLookupPopoverHtml,
   formatTopbarLangBadgeText,
+  formatShortcut,
   detectTextLanguage,
   type HudState,
   type SubtitleItem,
@@ -1380,12 +1382,38 @@ class LiveHearApp {
 
       case 'requestMicPermission':
         await this.startLiveStream();
-        if (this.hudState.hasMicPermission) {
-          this.showToast('✅ 麦克风已授权并开始实时收音！');
+        if (this.hudState.hasMicPermission && this.hudState.isStreaming) {
+          this.showToast('✅ 麦克风已就绪并开始实时收音！');
           this.streamManager.clear(this.hudState.isStreaming, true);
-        } else {
-          this.showToast('⚠️ 未能获得权限，请在「系统设置 -> 隐私与安全性 -> 麦克风」中允许 LiveHear');
+        } else if (!this.hudState.hasMicPermission) {
+          try {
+            await tauriInvoke('open_mic_privacy_settings');
+          } catch {}
+          this.showToast('⚠️ 未能访问麦克风，已打开系统麦克风隐私设置，请允许权限后重试');
         }
+        break;
+
+      case 'openMicPrivacySettings':
+        try {
+          await tauriInvoke('open_mic_privacy_settings');
+        } catch (e: any) {
+          this.showToast(`⚠️ 无法自动打开设置: ${e?.message || e}`);
+        }
+        break;
+
+      case 'minimizeWindow':
+        try {
+          await tauriInvoke('minimize_window');
+        } catch {}
+        break;
+
+      case 'closeWindow':
+        if (this.hudState.isStreaming) {
+          await this.stopLiveStream(true);
+        }
+        try {
+          await tauriInvoke('close_window');
+        } catch {}
         break;
 
       case 'toggleSettings':
@@ -1849,7 +1877,7 @@ class LiveHearApp {
           await tauriInvoke('set_click_through', { enabled: Boolean(this.hudState.isClickThrough) });
           this.showToast(
             this.hudState.isClickThrough
-              ? '👻 鼠标穿透已开启 (切回本窗口或按 Esc / ⌘+Shift+X 恢复交互)'
+              ? formatShortcut('👻 鼠标穿透已开启 (切回本窗口或按 Esc / ⌘+Shift+X 恢复交互)')
               : '已退出鼠标穿透，恢复窗口点击交互'
           );
         } catch (err: any) {
@@ -2478,6 +2506,21 @@ class LiveHearApp {
     }
   }
 
+  private isMicPermissionOrDeviceError(err: unknown): boolean {
+    const msg = String((err as any)?.message || err || '');
+    return /麦克风|音频输入设备|音频流|录制失败|AudioCapture|permission|denied/i.test(msg);
+  }
+
+  private refreshMicPermissionUi() {
+    const slot = document.getElementById('topbarMicSlot');
+    if (slot) {
+      slot.innerHTML = renderTopbarMicStatusHtml(this.hudState);
+    }
+    if (this.hudState.subtitles.length === 0) {
+      this.streamManager.clear(this.hudState.isStreaming, this.hudState.hasMicPermission);
+    }
+  }
+
   private async startLiveStream() {
     if (this.isStarting || this.hudState.isStreaming) return;
     this.isStarting = true;
@@ -2490,8 +2533,13 @@ class LiveHearApp {
 
     try {
       await tauriInvoke('start_soniox_live');
+      const wasDenied = !this.hudState.hasMicPermission;
       this.hudState.isStreaming = true;
       this.hudState.hasMicPermission = true;
+      this.hudState.permissionError = undefined;
+      if (wasDenied) {
+        this.refreshMicPermissionUi();
+      }
       if (liveBtn) {
         liveBtn.className = 'live-status-pill no-drag streaming';
         liveBtn.innerHTML = `<span class="live-dot-pulse"></span><span class="live-text">正在同传</span>`;
@@ -2509,7 +2557,18 @@ class LiveHearApp {
         liveBtn.className = 'live-status-pill no-drag paused';
         liveBtn.innerHTML = `<span class="live-dot-pulse"></span><span class="live-text">开始同传</span>`;
       }
-      this.showToast(`❌ 启动失败: ${err?.message || err}`);
+      if (this.isMicPermissionOrDeviceError(err)) {
+        const msg = String(err?.message || err);
+        this.hudState.hasMicPermission = false;
+        this.hudState.permissionError = msg;
+        this.refreshMicPermissionUi();
+        this.showToast(
+          `❌ ${msg}`,
+          `<button class="toast-btn-action no-drag" onclick="window.__livehear_action('openMicPrivacySettings')">隐私设置</button>`
+        );
+      } else {
+        this.showToast(`❌ 启动失败: ${err?.message || err}`);
+      }
     } finally {
       this.isStarting = false;
     }

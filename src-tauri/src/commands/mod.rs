@@ -309,6 +309,42 @@ pub async fn open_path_in_finder(app: AppHandle, path: String) -> Result<(), Str
 }
 
 #[tauri::command]
+pub async fn open_mic_privacy_settings(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        app.opener()
+            .open_url("ms-settings:privacy-microphone", None::<&str>)
+            .map_err(|e| format!("无法打开系统麦克风隐私设置: {e}"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        app.opener()
+            .open_url(
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+                None::<&str>,
+            )
+            .map_err(|e| format!("无法打开系统麦克风隐私设置: {e}"))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = &app;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub async fn minimize_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    window
+        .minimize()
+        .map_err(|e| format!("最小化窗口失败: {e}"))
+}
+
+#[tauri::command]
+pub async fn close_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.close().map_err(|e| format!("关闭窗口失败: {e}"))
+}
+
+#[tauri::command]
 pub async fn polish_transcript(
     original: String,
     draft: String,
