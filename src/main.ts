@@ -1,3 +1,4 @@
+import { icon } from './components/icons';
 import {
   renderHudView,
   renderTopbarMicStatusHtml,
@@ -10,6 +11,7 @@ import {
   renderLookupPopoverHtml,
   formatTopbarLangBadgeText,
   formatShortcut,
+  renderPolishPillLabel,
   detectTextLanguage,
   type HudState,
   type SubtitleItem,
@@ -1234,7 +1236,7 @@ class LiveHearApp {
       target.translationStatus = undefined;
       target.aiOriginal = target.original;
       target.aiTranslation = target.translated;
-      target.toneTag = (res.tone_tag && res.tone_tag.trim()) || `🗣️ ${speakUpper}口语`;
+      target.toneTag = (res.tone_tag && res.tone_tag.trim()) || `${speakUpper}口语`;
       target.isPolished = true;
       this.streamManager.updateLastFinalTurn(target, this.hudState.displayMode);
 
@@ -1573,11 +1575,11 @@ class LiveHearApp {
             const lbl = extra.querySelector('.copy-label');
             const ico = extra.querySelector('.copy-icon');
             if (lbl) lbl.textContent = '已复制';
-            if (ico) ico.textContent = '✓';
+            if (ico) ico.innerHTML = icon('check');
             setTimeout(() => {
               extra.classList.remove('copied');
               if (lbl) lbl.textContent = '复制';
-              if (ico) ico.textContent = '📋';
+              if (ico) ico.innerHTML = icon('copy');
             }, 1200);
           }
         }
@@ -1847,7 +1849,7 @@ class LiveHearApp {
         const nowMs = Date.now();
         const noteItem: SubtitleItem = {
           id: `note-${nowMs}`,
-          speaker: '📝 会议备忘',
+          speaker: '会议备忘',
           isTrackRemote: false,
           original: noteText,
           translated: noteText,
@@ -1856,7 +1858,7 @@ class LiveHearApp {
           detectedLanguage: 'zh',
           timestamp: new Date().toLocaleTimeString(),
           isPartial: false,
-          toneTag: '📌 重点笔记',
+          toneTag: '重点笔记',
           lastUpdatedMs: nowMs,
         };
         this.pushSubtitleWithCap(noteItem);
@@ -1947,7 +1949,7 @@ class LiveHearApp {
         break;
 
       case 'summarizeRecentContext': {
-        this.renderSuggestionDrawer(this.hudState.suggestions, '📝 3秒浓缩前文 (TL;DR)', true);
+        this.renderSuggestionDrawer(this.hudState.suggestions, '3秒浓缩前文 (TL;DR)', true);
         const recentSlice = this.hudState.subtitles
           .filter((s) => s.original || s.translated)
           .slice(-14)
@@ -1962,9 +1964,9 @@ class LiveHearApp {
           const cards = await tauriInvoke<any[]>('summarize_meeting_context', {
             recentHistory: recentSlice,
           });
-          this.renderSuggestionDrawer(cards, '📝 3秒浓缩前文 (TL;DR)', false);
+          this.renderSuggestionDrawer(cards, '3秒浓缩前文 (TL;DR)', false);
         } catch (err: any) {
-          this.renderSuggestionDrawer(this.hudState.suggestions, '📝 3秒浓缩前文 (TL;DR)', false);
+          this.renderSuggestionDrawer(this.hudState.suggestions, '3秒浓缩前文 (TL;DR)', false);
           this.showToast(`⚠️ 浓缩前文失败: ${err?.message || err}`);
         }
         break;
@@ -2051,7 +2053,7 @@ class LiveHearApp {
         const nowMs = Date.now();
         const noteItem: SubtitleItem = {
           id: `note-${nowMs}`,
-          speaker: '📝 会议备忘',
+          speaker: '会议备忘',
           isTrackRemote: false,
           original: noteText,
           translated: noteText,
@@ -2060,7 +2062,7 @@ class LiveHearApp {
           detectedLanguage: 'zh',
           timestamp: new Date().toLocaleTimeString(),
           isPartial: false,
-          toneTag: '📌 重点笔记',
+          toneTag: '重点笔记',
           lastUpdatedMs: nowMs,
         };
         this.pushSubtitleWithCap(noteItem);
@@ -2379,7 +2381,7 @@ class LiveHearApp {
       this.appConfig.asr_backend?.provider !== 'ollama';
     badge.style.display = show ? '' : 'none';
     if (show) {
-      badge.textContent = `⚡ ${latencyMs}ms`;
+      badge.innerHTML = `${icon('zap')}<span class="latency-value">${latencyMs}ms</span>`;
     }
   }
 
@@ -2392,7 +2394,7 @@ class LiveHearApp {
     const polishButton = document.getElementById('btnTogglePolish');
     const enabled = this.appConfig.openrouter.enable_polish !== false;
     if (polishButton) {
-      polishButton.textContent = enabled ? '✨ AI 整理：开' : 'AI 整理：关';
+      polishButton.innerHTML = renderPolishPillLabel(enabled);
       polishButton.setAttribute('aria-pressed', String(enabled));
     }
     const polishCheckbox = document.getElementById('cfgEnablePolish') as HTMLInputElement | null;
@@ -2406,7 +2408,7 @@ class LiveHearApp {
           ? '点击快速切换收听语种范围、听会同传语言与我方 Speak 目标外语'
           : '双向对谈：点击快速切换收听语种与翻译模式'
       );
-      langBadge.innerHTML = `<span class="globe-icon">🌐</span><span id="topbarLangBadgeText">${escapeHtml(
+      langBadge.innerHTML = `<span class="globe-icon">${icon('globe')}</span><span id="topbarLangBadgeText">${escapeHtml(
         formatTopbarLangBadgeText(this.appConfig)
       )}</span>`;
     }
@@ -2417,8 +2419,8 @@ class LiveHearApp {
           <button class="my-speaker-top-pill no-drag"
                   title="已将 Speaker ${this.hudState.mySpeakerId} 绑定为「我自己」(标记本人发言并屏蔽抢答弹窗；单向/本地模式自动译为外语，双向模式由 Soniox 原生互译)。点击可取消绑定"
                   onclick="window.__livehear_action('toggleMySpeaker', ${this.hudState.mySpeakerId})">
-            <span>🎙️ 我: Speaker ${this.hudState.mySpeakerId}</span>
-            <span class="ms-clear">✕</span>
+            <span>${icon('mic')} 我: Speaker ${this.hudState.mySpeakerId}</span>
+            <span class="ms-clear">${icon('x')}</span>
           </button>
         `
         : '';

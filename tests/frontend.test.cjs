@@ -6,6 +6,18 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
 
+let iconsModule = null;
+function loadIcons() {
+  if (iconsModule) return iconsModule;
+  const exportsObj = {};
+  const src = fs.readFileSync(path.join(__dirname, '../src/components/icons.ts'), 'utf8');
+  vm.runInContext(
+    ts.transpileModule(src, {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020}}).outputText,
+    vm.createContext({ exports: exportsObj, module: { exports: exportsObj } })
+  );
+  return (iconsModule = exportsObj);
+}
+
 function harness() {
   const listeners = new Map();
   const windowListeners = new Map();
@@ -40,12 +52,16 @@ function harness() {
   let loadedHud = null;
   context.require = name => {
     if (name === '@tauri-apps/api/event') return { listen: async (event, handler) => listeners.set(event, handler) };
+    if (name === './components/icons') return loadIcons();
     if (name === './components/hud') {
       const hudExports = {};
       const hudSource = fs.readFileSync(path.join(__dirname, '../src/components/hud.ts'), 'utf8');
       vm.runInContext(
         ts.transpileModule(hudSource, {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020}}).outputText,
-        vm.createContext({ exports: hudExports, module: { exports: hudExports } })
+        vm.createContext({ exports: hudExports, module: { exports: hudExports }, require: n => {
+          if (n === './icons') return loadIcons();
+          throw Error(`Unexpected hud module: ${n}`);
+        } })
       );
       loadedHud = hudExports;
       return { ...hudExports, renderQuickSpeakDockHtml: () => '' };

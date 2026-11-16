@@ -1978,3 +1978,54 @@ body {
     gap: 8px;
   }
 }
+
+/* SVG icon system: inherits text color, scales with font-size */
+.ico {
+  width: 1.15em;
+  height: 1.15em;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vertical-align: -0.2em;
+}
+.icon-btn .ico {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.8;
+}
+.icon-btn.stealth-active .ico,
+.icon-btn.active .ico {
+  stroke-width: 2.1;
+}
+.placeholder-emoji .ico {
+  width: 36px;
+  height: 36px;
+  stroke-width: 1.5;
+  opacity: 0.85;
+}
+.avatar-icon .ico,
+.copy-icon .ico {
+  width: 13px;
+  height: 13px;
+}
+.ql-close .ico,
+.slp-close .ico,
+.qsr-close .ico,
+.close-modal-btn .ico,
+.copilot-close-btn .ico,
+.ms-clear .ico {
+  width: 12px;
+  height: 12px;
+  vertical-align: middle;
+}
+#btnTogglePolish,
+.latency-badge,
+.copilot-trigger-pill,
+.my-speaker-top-pill > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
