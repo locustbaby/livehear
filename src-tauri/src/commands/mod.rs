@@ -477,8 +477,8 @@ pub async fn quick_speak_translate(
 }
 
 #[tauri::command]
-pub async fn list_audio_devices() -> Result<Vec<String>, String> {
-    Ok(crate::services::audio_capture::list_input_devices())
+pub async fn list_audio_devices() -> crate::services::audio_capture::AudioDevices {
+    crate::services::audio_capture::list_audio_devices()
 }
 
 #[tauri::command]

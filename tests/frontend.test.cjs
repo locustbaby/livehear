@@ -46,6 +46,7 @@ function harness() {
       },
       getElementsByName() { return []; },
       querySelector() { return null; },
+      querySelectorAll() { return []; },
     },
     navigator: { clipboard: { writeText: async text => clipboard.push(text) } },
   };
@@ -382,11 +383,11 @@ test('click-through mode restores interaction on Escape or window blur then focu
 test('mic permission failure updates state and requestMicPermission opens system privacy settings', async () => {
   const h = harness();
   h.overrides.set('start_soniox_live', async () => {
-    throw new Error('麦克风启动失败: Access denied');
+    throw new Error('麦克风访问被拒绝，请在系统隐私设置中允许访问后重试');
   });
   await h.app.startLiveStream();
   assert.equal(h.app.hudState.hasMicPermission, false);
-  assert.ok(h.app.hudState.permissionError.includes('Access denied'));
+  assert.ok(h.app.hudState.permissionError.includes('麦克风访问被拒绝'));
 
   await h.app.handleAction('requestMicPermission');
   assert.equal(h.calls.filter(c => c.cmd === 'open_mic_privacy_settings').length, 1);
@@ -395,6 +396,40 @@ test('mic permission failure updates state and requestMicPermission opens system
   await h.app.startLiveStream();
   assert.equal(h.app.hudState.hasMicPermission, true);
   assert.equal(h.app.hudState.permissionError, undefined);
+});
+
+test('unavailable audio hardware does not prompt for microphone access', async () => {
+  const h = harness();
+  h.overrides.set('start_soniox_live', async () => {
+    throw new Error('音频驱动异常: 未检测到可用的音频输入设备，请检查麦克风或内录设备连接');
+  });
+  await h.app.handleAction('requestMicPermission');
+  assert.equal(h.app.hudState.isStreaming, false);
+  assert.equal(h.app.hudState.hasMicPermission, true);
+  assert.ok(!h.calls.some(({ cmd }) => cmd === 'open_mic_privacy_settings'));
+});
+
+test('Windows playback sources persist as output IDs and label the live meter', async () => {
+  const h = harness();
+  const output = { id: 'wasapi-loopback:wasapi:headphones', name: 'Headphones' };
+  h.overrides.set('list_audio_devices', async () => ({ inputs: ['Built-in Microphone'], system_outputs: [output] }));
+  const settings = {};
+  h.elements.set('settingsOverlayContainer', settings);
+  await h.app.handleAction('toggleSettings');
+  assert.match(settings.innerHTML, /Windows 系统声音/);
+  assert.ok(settings.innerHTML.includes(output.id));
+
+  h.elements.set('cfgInputDevice', { value: output.id });
+  await h.app.handleAction('saveAllConfig');
+  const saved = h.calls.find(({ cmd }) => cmd === 'save_config');
+  assert.equal(saved.args.newConfig.soniox.input_device, output.id);
+
+  await h.init();
+  const meter = {};
+  h.elements.set('micVolumeText', meter);
+  h.listeners.get('audio-level')({ payload: { volume: 20 } });
+  assert.equal(meter.textContent, '系统声音: 20%');
+  assert.match(h.hud.renderTopbarMicStatusHtml(h.app.hudState, h.app.appConfig), /系统声音: 20%/);
 });
 
 test('formatShortcut adapts macOS symbols to Ctrl on Windows and keeps macOS intact', () => {

@@ -159,7 +159,7 @@ impl LiveHearOrchestrator {
             *lock = Some(audio_sender.clone());
         }
 
-        // 2. 启动系统原生麦克风或指定内录设备实时高保真采集
+        // 2. 启动选定音频源的实时采集
         {
             let mut cap = self.audio_capture.lock().await;
             if let Err(e) = cap.start(
@@ -170,11 +170,10 @@ impl LiveHearOrchestrator {
                 self.input_device.as_deref(),
             ) {
                 *self.audio_tx.lock().await = None;
-                let err_msg = format!("麦克风启动失败: {}", e);
-                eprintln!("⚠️ [LiveHear] {}", err_msg);
+                eprintln!("⚠️ [LiveHear] {}", e);
                 let _ = app.emit("asr-status", "error");
-                let _ = app.emit("asr-error", err_msg.clone());
-                return Err(LiveHearError::AudioCaptureError(err_msg));
+                let _ = app.emit("asr-error", e.clone());
+                return Err(LiveHearError::AudioCaptureError(e));
             }
         }
 

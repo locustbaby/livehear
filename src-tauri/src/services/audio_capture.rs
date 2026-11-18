@@ -1,5 +1,5 @@
-use cpal::Stream;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{FromSample, SampleFormat, SizedSample, Stream};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,6 +7,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
 pub const VAD_FINALIZE_SIGNAL: u8 = 1;
+const LOOPBACK_PREFIX: &str = "wasapi-loopback:";
 
 struct VadGate {
     enable_vad: bool,
@@ -105,6 +106,23 @@ impl AudioDspPipeline {
             vad_gate: VadGate::new(enable_vad, vad_threshold),
             last_emitted_vol: 0,
             last_emit_instant: std::time::Instant::now(),
+        }
+    }
+
+    fn push_interleaved<T: SizedSample>(
+        &mut self,
+        data: &cpal::Data,
+        channels: usize,
+        audio_tx: &mpsc::Sender<Vec<u8>>,
+        app: &AppHandle,
+    ) where
+        f32: FromSample<T>,
+    {
+        if let Some(samples) = data.as_slice::<T>() {
+            for frame in samples.chunks_exact(channels) {
+                let sum: f32 = frame.iter().map(|sample| sample.to_sample::<f32>()).sum();
+                self.push_mono_sample((sum / channels as f32).clamp(-1.0, 1.0), audio_tx, app);
+            }
         }
     }
 
@@ -215,20 +233,56 @@ pub struct NativeAudioCapture {
     app_handle: Option<AppHandle>,
 }
 
-pub fn list_input_devices() -> Vec<String> {
+#[derive(Default, serde::Serialize)]
+pub struct AudioDevices {
+    inputs: Vec<String>,
+    system_outputs: Vec<SystemOutput>,
+}
+
+#[derive(serde::Serialize)]
+struct SystemOutput {
+    id: String,
+    name: String,
+}
+
+pub fn list_audio_devices() -> AudioDevices {
     let host = cpal::default_host();
-    let mut names = Vec::new();
+    let mut sources = AudioDevices::default();
     if let Ok(devices) = host.input_devices() {
         for dev in devices {
             if let Ok(desc) = dev.description() {
                 let name = desc.name().trim().to_string();
-                if !name.is_empty() && !names.contains(&name) {
-                    names.push(name);
+                if !name.is_empty() && !sources.inputs.contains(&name) {
+                    sources.inputs.push(name);
                 }
             }
         }
     }
-    names
+    if cfg!(target_os = "windows") {
+        sources.system_outputs.push(SystemOutput {
+            id: format!("{LOOPBACK_PREFIX}default"),
+            name: "系统默认播放设备".into(),
+        });
+        if let Ok(devices) = host.output_devices() {
+            for device in devices {
+                if let (Ok(id), Ok(description)) = (device.id(), device.description()) {
+                    sources.system_outputs.push(SystemOutput {
+                        id: format!("{LOOPBACK_PREFIX}{id}"),
+                        name: description.name().to_string(),
+                    });
+                }
+            }
+        }
+    }
+    sources
+}
+
+fn is_microphone_access_denied(error: &cpal::Error) -> bool {
+    // CPAL's WASAPI backend leaves E_ACCESSDENIED in the formatted OS error.
+    error.kind() == cpal::ErrorKind::PermissionDenied
+        || error
+            .message()
+            .is_some_and(|msg| msg.contains("(os error -2147024891)"))
 }
 
 impl Default for NativeAudioCapture {
@@ -246,7 +300,7 @@ impl NativeAudioCapture {
         }
     }
 
-    /// 启动系统麦克风或指定音频输入设备（如 BlackHole / Loopback 系统内录）的高保真采集
+    /// 启动选定音频源的采集流。
     pub fn start(
         &mut self,
         audio_tx: mpsc::Sender<Vec<u8>>,
@@ -256,40 +310,74 @@ impl NativeAudioCapture {
         preferred_device: Option<&str>,
     ) -> Result<(), String> {
         let host = cpal::default_host();
-        let device = preferred_device
-            .map(str::trim)
-            .filter(|s| !s.is_empty() && *s != "default")
-            .and_then(|target_name| {
-                let devs: Vec<_> = host.input_devices().ok()?.collect();
-                let name_of =
-                    |d: &cpal::Device| d.description().map(|desc| desc.name().to_string()).ok();
-                // Exact match first: "Microphone" must not pick "Microphone Array" just because it enumerates earlier.
-                let exact = devs
-                    .iter()
-                    .position(|d| name_of(d).as_deref() == Some(target_name));
-                let idx = exact.or_else(|| {
-                    devs.iter()
-                        .position(|d| name_of(d).is_some_and(|n| n.contains(target_name)))
-                })?;
-                devs.into_iter().nth(idx)
-            })
-            .or_else(|| host.default_input_device())
-            .ok_or_else(|| {
-                "未检测到可用的系统音频输入设备，请检查麦克风或内录设备连接".to_string()
-            })?;
+        let preferred_device = preferred_device.map(str::trim);
+        let output_id = preferred_device.and_then(|name| name.strip_prefix(LOOPBACK_PREFIX));
+        let source = if output_id.is_some() {
+            "系统声音"
+        } else {
+            "麦克风"
+        };
+        let device = if let Some(id) = output_id {
+            if !cfg!(target_os = "windows") {
+                return Err("此系统不支持 Windows 系统声音采集，请重新选择音频源".into());
+            }
+            let output = if id == "default" {
+                host.default_output_device()
+            } else {
+                id.parse::<cpal::DeviceId>()
+                    .ok()
+                    .and_then(|id| host.device_by_id(&id))
+                    .filter(DeviceTrait::supports_output)
+            };
+            output.ok_or("所选播放设备不可用，请在设置中重新选择会议使用的播放设备")?
+        } else {
+            preferred_device
+                .filter(|s| !s.is_empty() && *s != "default")
+                .and_then(|target_name| {
+                    let devs: Vec<_> = host.input_devices().ok()?.collect();
+                    let name_of = |d: &cpal::Device| {
+                        d.description()
+                            .map(|desc| desc.name().trim().to_string())
+                            .ok()
+                    };
+                    // Exact match first: "Microphone" must not pick "Microphone Array" just because it enumerates earlier.
+                    let exact = devs
+                        .iter()
+                        .position(|d| name_of(d).as_deref() == Some(target_name));
+                    let idx = exact.or_else(|| {
+                        devs.iter()
+                            .position(|d| name_of(d).is_some_and(|n| n.contains(target_name)))
+                    })?;
+                    devs.into_iter().nth(idx)
+                })
+                .or_else(|| host.default_input_device())
+                .ok_or("未检测到可用的音频输入设备，请检查麦克风或内录设备连接")?
+        };
+
+        let capture_error = |action: &str, error: cpal::Error| {
+            if output_id.is_none() && is_microphone_access_denied(&error) {
+                format!("麦克风访问被拒绝，请在系统隐私设置中允许访问后重试（{error}）")
+            } else {
+                format!("{source}{action}失败: {error}")
+            }
+        };
 
         let device_name = device
             .description()
             .map(|d| d.name().to_string())
-            .unwrap_or_else(|_| "默认输入设备".to_string());
+            .unwrap_or_else(|_| source.to_string());
         println!(
             "🎙️ [LiveHear] 已连接音频输入源: 「{}」 (智能静音门禁: {})",
             device_name, enable_vad
         );
 
-        let default_config = device
-            .default_input_config()
-            .map_err(|e| format!("获取麦克风配置失败: {}", e))?;
+        // WASAPI enables loopback when an input stream is opened on a playback device.
+        let default_config = if output_id.is_some() {
+            device.default_output_config()
+        } else {
+            device.default_input_config()
+        }
+        .map_err(|e| capture_error("配置", e))?;
 
         let in_channels = default_config.channels() as usize;
         let in_sample_rate = default_config.sample_rate() as f64;
@@ -300,15 +388,18 @@ impl NativeAudioCapture {
 
         let err_app = app.clone();
         let err_reported = Arc::new(AtomicBool::new(false));
-        // Device unplug / default-device switch surfaces only here; tell the UI once instead of going silent.
         let err_fn = move |err: cpal::Error| {
-            eprintln!("⚠️ [LiveHear] 麦克风音频流错误: {}", err);
+            if err.kind() == cpal::ErrorKind::DeviceChanged {
+                return;
+            }
+            eprintln!("⚠️ [LiveHear] {source}采集错误: {err}");
             if !err_reported.swap(true, Ordering::Relaxed) {
                 let msg = match err.kind() {
-                    cpal::ErrorKind::DeviceNotAvailable => {
-                        "麦克风设备已断开或不可用，请重新连接设备后重启同传".to_string()
+                    cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated => {
+                        let _ = err_app.emit("audio-level", serde_json::json!({ "volume": 0 }));
+                        format!("{source}设备已断开或不可用，请重新连接设备后重启同传")
                     }
-                    _ => format!("麦克风音频流错误: {}", err),
+                    _ => format!("{source}采集错误: {err}"),
                 };
                 let _ = err_app.emit("asr-error", msg);
             }
@@ -325,52 +416,32 @@ impl NativeAudioCapture {
             vad_threshold,
         );
 
-        let stream = match sample_format {
-            cpal::SampleFormat::F32 => device.build_input_stream(
-                stream_config,
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    if !is_running_clone.load(Ordering::Relaxed) {
-                        return;
-                    }
+        let push_samples = match sample_format {
+            SampleFormat::I16 => AudioDspPipeline::push_interleaved::<i16>,
+            SampleFormat::I24 => AudioDspPipeline::push_interleaved::<cpal::I24>,
+            SampleFormat::I32 => AudioDspPipeline::push_interleaved::<i32>,
+            SampleFormat::I64 => AudioDspPipeline::push_interleaved::<i64>,
+            SampleFormat::U8 => AudioDspPipeline::push_interleaved::<u8>,
+            SampleFormat::F32 => AudioDspPipeline::push_interleaved::<f32>,
+            SampleFormat::F64 => AudioDspPipeline::push_interleaved::<f64>,
+            _ => return Err(format!("{source}使用了暂不支持的采样格式: {sample_format}")),
+        };
 
-                    for frame in data.chunks(in_channels) {
-                        let mut sum = 0.0f32;
-                        for &s in frame {
-                            sum += s;
-                        }
-                        let mono = (sum / in_channels as f32).clamp(-1.0, 1.0);
-                        dsp.push_mono_sample(mono, &audio_tx, &app_clone);
+        let stream = device
+            .build_input_stream_raw(
+                stream_config,
+                sample_format,
+                move |data, _| {
+                    if is_running_clone.load(Ordering::Relaxed) {
+                        push_samples(&mut dsp, data, in_channels, &audio_tx, &app_clone);
                     }
                 },
                 err_fn,
                 None,
-            ),
-            cpal::SampleFormat::I16 => device.build_input_stream(
-                stream_config,
-                move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    if !is_running_clone.load(Ordering::Relaxed) {
-                        return;
-                    }
+            )
+            .map_err(|e| capture_error("采集流创建", e))?;
 
-                    for frame in data.chunks(in_channels) {
-                        let mut sum = 0i32;
-                        for &s in frame {
-                            sum += s as i32;
-                        }
-                        let mono = ((sum / in_channels as i32) as f32 / 32768.0).clamp(-1.0, 1.0);
-                        dsp.push_mono_sample(mono, &audio_tx, &app_clone);
-                    }
-                },
-                err_fn,
-                None,
-            ),
-            _ => return Err("暂不支持该音频设备的采样格式，仅支持 F32 或 I16".to_string()),
-        }
-        .map_err(|e| format!("构建麦克风音频流失败: {}。请检查系统麦克风隐私授权。", e))?;
-
-        stream
-            .play()
-            .map_err(|e| format!("启动麦克风录制失败: {}", e))?;
+        stream.play().map_err(|e| capture_error("启动", e))?;
 
         self.stream = Some(stream);
         self.is_capturing = is_running;
@@ -394,6 +465,22 @@ mod tests {
     use super::*;
     use crate::orchestrator::finish_audio_stream;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn identifies_microphone_permission_errors() {
+        use cpal::{Error, ErrorKind};
+
+        assert!(is_microphone_access_denied(
+            &ErrorKind::PermissionDenied.into()
+        ));
+        assert!(is_microphone_access_denied(&Error::with_message(
+            ErrorKind::BackendError,
+            "Failed to initialize audio client: 拒绝访问。 (os error -2147024891)",
+        )));
+        assert!(!is_microphone_access_denied(
+            &ErrorKind::DeviceNotAvailable.into()
+        ));
+    }
 
     #[tokio::test]
     async fn closed_asr_releases_capture_and_sender_even_when_draining() {

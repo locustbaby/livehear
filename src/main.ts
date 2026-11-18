@@ -11,6 +11,7 @@ import {
   renderLookupPopoverHtml,
   formatTopbarLangBadgeText,
   formatShortcut,
+  audioLevelLabel,
   renderPolishPillLabel,
   detectTextLanguage,
   type HudState,
@@ -18,7 +19,7 @@ import {
   type SubtitleDisplayMode,
   type SelectionLookupData,
 } from './components/hud';
-import type { FullAppConfig, QuickSpeakResult } from './types/domain';
+import type { AudioDevices, FullAppConfig, QuickSpeakResult } from './types/domain';
 
 function hasNativeRuntime(): boolean {
   return typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
@@ -395,11 +396,10 @@ class LiveHearApp {
 
   private updateMicVolume(volume: number) {
     if (this.hudState.micVolume === volume) return;
-    if (volume === 0 && this.hudState.micVolume === 0) return;
     this.hudState.micVolume = volume;
 
     const text = document.getElementById('micVolumeText');
-    if (text) text.textContent = `麦克风: ${volume}%`;
+    if (text) text.textContent = `${audioLevelLabel(this.appConfig)}: ${volume}%`;
 
     const dot = document.querySelector('.track-indicator .track-dot') as HTMLElement;
     if (dot) {
@@ -438,6 +438,7 @@ class LiveHearApp {
         };
         this.streamManager.speakTargetLang = this.appConfig.soniox.speak_target_language || 'en';
         this.refreshTopbarBadges();
+        this.refreshMicPermissionUi();
         this.refreshQuickSpeakDock();
       }
     } catch (e) {
@@ -1507,10 +1508,7 @@ class LiveHearApp {
           this.showToast('✅ 麦克风已就绪并开始实时收音！');
           this.streamManager.clear(this.hudState.isStreaming, true);
         } else if (!this.hudState.hasMicPermission) {
-          try {
-            await tauriInvoke('open_mic_privacy_settings');
-          } catch {}
-          this.showToast('⚠️ 未能访问麦克风，已打开系统麦克风隐私设置，请允许权限后重试');
+          await this.handleAction('openMicPrivacySettings');
         }
         break;
 
@@ -1542,10 +1540,7 @@ class LiveHearApp {
         this.hudState.isSettingsOpen = !this.hudState.isSettingsOpen;
         if (this.hudState.isSettingsOpen) {
           try {
-            const devices = await tauriInvoke<string[]>('list_audio_devices');
-            if (Array.isArray(devices)) {
-              this.hudState.audioDevices = devices;
-            }
+            this.hudState.audioDevices = await tauriInvoke<AudioDevices>('list_audio_devices');
           } catch {}
         }
         const overlayContainer = document.getElementById('settingsOverlayContainer');
@@ -2355,11 +2350,16 @@ class LiveHearApp {
           this.streamManager.speakTargetLang = this.appConfig.soniox.speak_target_language || 'en';
           this.refreshTopbarBadges();
           this.refreshQuickSpeakDock();
+          if (configBeforeSave.soniox.input_device !== this.appConfig.soniox.input_device) {
+            this.hudState.hasMicPermission = true;
+            this.hudState.permissionError = undefined;
+            this.refreshMicPermissionUi();
+          }
           if (this.hudState.isSettingsOpen) await this.handleAction('toggleSettings');
 
           if (this.hudState.isStreaming) {
             await this.restartLiveStream();
-            this.showToast('✅ 配置已保存并热重载实时同传流！');
+            if (this.hudState.isStreaming) this.showToast('✅ 配置已保存并热重载实时同传流！');
           } else {
             this.showToast('✅ 配置已成功保存！');
           }
@@ -2679,15 +2679,10 @@ class LiveHearApp {
     }
   }
 
-  private isMicPermissionOrDeviceError(err: unknown): boolean {
-    const msg = String((err as any)?.message || err || '');
-    return /麦克风|音频输入设备|音频流|录制失败|AudioCapture|permission|denied/i.test(msg);
-  }
-
   private refreshMicPermissionUi() {
     const slot = document.getElementById('topbarMicSlot');
     if (slot) {
-      slot.innerHTML = renderTopbarMicStatusHtml(this.hudState);
+      slot.innerHTML = renderTopbarMicStatusHtml(this.hudState, this.appConfig);
     }
     if (this.hudState.subtitles.length === 0) {
       this.streamManager.clear(this.hudState.isStreaming, this.hudState.hasMicPermission);
@@ -2754,7 +2749,7 @@ class LiveHearApp {
       }
       this.showToast(this.appConfig.asr_backend?.provider === 'ollama' && !this.appConfig.openrouter.api_key?.trim()
         ? '🟢 本地识别已就绪；未配置 AI，字幕仅显示原文'
-        : '🟢 实时识别已就绪，请说话');
+        : `🟢 实时识别已连接，正在监听${audioLevelLabel(this.appConfig)}`);
     } catch (err: any) {
       console.warn('启动实时流错误:', err);
       this.hudState.isStreaming = false;
@@ -2762,8 +2757,8 @@ class LiveHearApp {
         liveBtn.className = 'live-status-pill no-drag paused';
         liveBtn.innerHTML = `<span class="live-dot-pulse"></span><span class="live-text">开始同传</span>`;
       }
-      if (this.isMicPermissionOrDeviceError(err)) {
-        const msg = String(err?.message || err);
+      const msg = String(err?.message || err);
+      if (msg.includes('麦克风访问被拒绝')) {
         this.hudState.hasMicPermission = false;
         this.hudState.permissionError = msg;
         this.refreshMicPermissionUi();
@@ -2772,7 +2767,7 @@ class LiveHearApp {
           `<button class="toast-btn-action no-drag" onclick="window.__livehear_action('openMicPrivacySettings')">隐私设置</button>`
         );
       } else {
-        this.showToast(`❌ 启动失败: ${err?.message || err}`);
+        this.showToast(`❌ 启动失败: ${msg}`);
       }
     } finally {
       this.isStarting = false;

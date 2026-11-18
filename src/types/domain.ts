@@ -1,5 +1,10 @@
 // 前端统一领域实体模型与配置规范 (与 Rust 后端 100% 对齐)
 
+export interface AudioDevices {
+  inputs: string[];
+  system_outputs: { id: string; name: string }[];
+}
+
 export interface FullAppConfig {
   asr_backend?: { provider: string; ollama_url: string; ollama_model: string };
   soniox: {

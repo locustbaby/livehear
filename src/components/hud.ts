@@ -1,5 +1,5 @@
 // 会议实时双语同传与智能推测 HUD 视图组件 (Live Meeting HUD)
-import type { FullAppConfig } from '../types/domain';
+import type { AudioDevices, FullAppConfig } from '../types/domain';
 import { icon } from './icons';
 
 export interface SubtitleItem {
@@ -67,7 +67,7 @@ export interface HudState {
   isQuickLangOpen?: boolean;
   isCopilotLoading?: boolean;
   isStealthMode?: boolean;
-  audioDevices?: string[];
+  audioDevices?: AudioDevices;
   mySpeakerId?: number | null;
   quickSpeakCard?: QuickSpeakCardData | null;
 }
@@ -123,9 +123,16 @@ export function formatShortcut(text: string, platform?: string): string {
   return text.replace(/⌘/g, 'Ctrl').replace(/\bCmd\+/g, 'Ctrl+');
 }
 
-export function renderTopbarMicStatusHtml(state: HudState): string {
-  const isMicHealthy = state.hasMicPermission && state.micVolume > 0;
-  if (!state.hasMicPermission) {
+export function isSystemAudioSource(device?: string | null): boolean {
+  return device?.startsWith('wasapi-loopback:') ?? false;
+}
+
+export function audioLevelLabel(config?: FullAppConfig): string {
+  return isSystemAudioSource(config?.soniox.input_device) ? '系统声音' : '麦克风';
+}
+
+export function renderTopbarMicStatusHtml(state: HudState, config?: FullAppConfig): string {
+  if (!state.hasMicPermission && !isSystemAudioSource(config?.soniox.input_device)) {
     return `
       <button class="permission-pill no-drag warning"
               id="btnRequestMic"
@@ -135,14 +142,15 @@ export function renderTopbarMicStatusHtml(state: HudState): string {
       </button>
     `;
   }
+  const label = audioLevelLabel(config);
   return `
-    <div class="track-indicator ${isMicHealthy ? 'active' : ''}"
+    <div class="track-indicator ${state.micVolume > 0 ? 'active' : ''}"
          id="micIndicator"
-         title="麦克风实时输入音量: ${state.micVolume}%">
+         title="${label}实时输入音量">
       <span class="track-dot ${state.micVolume > 3 ? 'pulse-green' : 'active'}"></span>
-      <span id="micVolumeText">麦克风: ${state.micVolume}%</span>
+      <span id="micVolumeText">${label}: ${state.micVolume}%</span>
     </div>
-    <div class="wave-visualizer ${state.micVolume > 3 ? 'animating' : ''}" id="micWaveVisualizer" title="输入音量: ${state.micVolume}%">
+    <div class="wave-visualizer ${state.micVolume > 3 ? 'animating' : ''}" id="micWaveVisualizer" title="实时输入音量">
       <span class="bar bar-1"></span>
       <span class="bar bar-2"></span>
       <span class="bar bar-3"></span>
@@ -185,7 +193,7 @@ export function renderHudView(
           </button>
 
           <!-- 麦克风权限与音量实时监测 -->
-          <span class="topbar-mic-slot" id="topbarMicSlot">${renderTopbarMicStatusHtml(state)}</span>
+          <span class="topbar-mic-slot" id="topbarMicSlot">${renderTopbarMicStatusHtml(state, config)}</span>
 
           <!-- 语种范围与目标语言快捷切换胶囊 (点击弹出快捷面板) -->
           <button class="lang-auto-badge no-drag interactive-lang-pill"
@@ -383,7 +391,7 @@ export function renderEmptyPlaceholder(isStreaming: boolean, hasPermission: bool
           !hasPermission
             ? '需要麦克风访问权限'
             : isStreaming
-            ? '系统已就绪，正在实时收音中...'
+            ? '同传已连接，等待字幕'
             : '实时同传已暂停'
         }
       </div>
@@ -392,7 +400,7 @@ export function renderEmptyPlaceholder(isStreaming: boolean, hasPermission: bool
           !hasPermission
             ? 'LiveHear 需要麦克风权限来捕获实时发言并完成同传翻译。点击下方按钮授予授权：'
             : isStreaming
-            ? '请开始说话（无需指定语言，Soniox 会自动识别全语种及说话人声纹，并在毫秒级流式打字上屏）。'
+            ? '播放会议音频或对麦克风说话。若顶栏电平一直为 0%，请在设置中检查当前音频源。'
             : '点击顶部「开始同传」按钮，从所选音频输入设备开始识别。'
         }
       </div>
@@ -1053,6 +1061,13 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
   const isOneWay = config.soniox.translation_type !== 'two_way';
   const customTermsStr = (config.soniox.custom_terms || []).join('\n');
   const hintsStr = (config.soniox.language_hints || ['en', 'zh']).join(', ');
+  const inputDevices = state.audioDevices?.inputs ?? [];
+  const systemOutputs = state.audioDevices?.system_outputs ?? [];
+  const selectedDevice = config.soniox.input_device || '';
+  const usingSystemAudio = isSystemAudioSource(selectedDevice);
+  const usingDefaultInput = !selectedDevice || selectedDevice === 'default';
+  const selectedIsListed = inputDevices.some((name) => name === selectedDevice)
+    || systemOutputs.some(({ id }) => id === selectedDevice);
 
   return `
     <div class="settings-overlay no-drag" id="settingsOverlay" onclick="if(event.target === this) window.__livehear_action('toggleSettings')">
@@ -1267,12 +1282,15 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
           </div>
 
           <div class="setting-group">
-            <label>音频输入源与硬件诊断 (支持麦克风 / BlackHole 系统内录切换)</label>
+            <label for="cfgInputDevice">音频源与硬件诊断</label>
             <div class="mic-diag-card">
               <div class="setting-group" style="margin-bottom: 6px;">
                 <select id="cfgInputDevice">
-                  <option value="" ${!config.soniox.input_device ? 'selected' : ''}>系统默认输入设备 (Default Input)</option>
-                  ${(state.audioDevices || [])
+                  <option value="" ${usingDefaultInput ? 'selected' : ''}>系统默认输入设备</option>
+                  ${!usingDefaultInput && !selectedIsListed
+                    ? `<option value="${escapeHtml(selectedDevice)}" selected>上次选择的音频源（未列出）</option>`
+                    : ''}
+                  ${inputDevices
                     .map(
                       (dev) => `
                     <option value="${escapeHtml(dev)}" ${config.soniox.input_device === dev ? 'selected' : ''}>
@@ -1281,15 +1299,26 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
                   `
                     )
                     .join('')}
+                  ${systemOutputs.length ? `
+                    <optgroup label="Windows 系统声音">
+                      ${systemOutputs.map(({ id, name }) => `
+                        <option value="${escapeHtml(id)}" ${selectedDevice === id ? 'selected' : ''}>${escapeHtml(name)}</option>
+                      `).join('')}
+                    </optgroup>
+                  ` : ''}
                 </select>
-                <div class="setting-tip">戴耳机开会时，可切换至 BlackHole / Loopback 等虚拟内录设备以直接捕获 100% 纯净系统原声。</div>
+                <div class="setting-tip">${systemOutputs.length
+                  ? '听取会议远端声音时，请在「Windows 系统声音」下选择会议软件正在使用的扬声器或耳机。'
+                  : '戴耳机开会时，可选择 BlackHole / Loopback 等虚拟输入设备来采集会议声音。'}</div>
               </div>
-              <div class="mic-status-row">
-                <span>系统麦克风授权:</span>
-                <span class="${state.hasMicPermission ? 'text-success' : 'text-danger'}">
-                  ${state.hasMicPermission ? `${icon('check')} 已授权` : `${icon('alert')} 未授权`}
-                </span>
-              </div>
+              ${usingSystemAudio ? '' : `
+                <div class="mic-status-row">
+                  <span>麦克风访问:</span>
+                  <span class="${!state.hasMicPermission ? 'text-danger' : state.isStreaming ? 'text-success' : ''}">
+                    ${!state.hasMicPermission ? '访问被拒绝' : state.isStreaming ? '采集流已打开' : '启动同传时检测'}
+                  </span>
+                </div>
+              `}
               <div class="mic-status-row">
                 <span>实时输入电平:</span>
                 <span style="font-weight: 600; color: #38bdf8" id="diagVolumeText">${state.micVolume}%</span>
@@ -1297,9 +1326,11 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
               <div class="mic-meter-bar">
                 <div class="mic-meter-fill" id="diagMeterFill" style="width: ${state.micVolume}%"></div>
               </div>
-              <button class="btn-subtle" style="margin-top: 8px; width: 100%" onclick="window.__livehear_action('requestMicPermission')">
-                ${icon('mic')} 重新请求/唤醒麦克风授权
-              </button>
+              ${usingSystemAudio ? '' : `
+                <button class="btn-subtle" style="margin-top: 8px; width: 100%" onclick="window.__livehear_action('openMicPrivacySettings')">
+                  ${icon('mic')} 打开麦克风隐私设置
+                </button>
+              `}
               <button class="btn-subtle" style="margin-top: 6px; width: 100%; border-color: rgba(56, 189, 248, 0.4); color: #38bdf8;" onclick="window.__livehear_action('simulateSpeech')">
                 ▶️ 测试模拟音频推流 (8.5秒英文语音，验证同传打字上屏)
               </button>
