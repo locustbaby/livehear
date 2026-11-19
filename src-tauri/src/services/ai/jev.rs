@@ -5,6 +5,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use super::openrouter::send_chat_request;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ChatMessage {
     role: String,
@@ -104,16 +106,15 @@ impl DecisionGateService for JevAdapter {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let res = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| LiveHearError::NetworkError(e.to_string()))?;
+        let request = self.client.post(&url).bearer_auth(api_key);
+        let response = match send_chat_request(request, &payload).await {
+            Ok(response) => Some(response),
+            Err(LiveHearError::LlmError(_)) => None,
+            Err(error) => return Err(error),
+        };
 
-        if let Ok(data) = res.json::<ChatCompletionResponse>().await
+        if let Some(response) = response
+            && let Ok(data) = response.json::<ChatCompletionResponse>().await
             && let Some(choice) = data.choices.first()
         {
             let raw_content = &choice.message.content;

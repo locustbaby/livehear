@@ -34,6 +34,7 @@ export interface FullAppConfig {
     base_url: string;
     translate_model: string;
     predict_model: string;
+    quick_translate_model?: string;
     enable_polish?: boolean;
   };
   jev: {
@@ -105,11 +106,4 @@ export interface OrchestratedEventPayload {
   segment: TranscriptSegment;
   intent?: string;
   suggestions?: ReplySuggestion[];
-}
-
-export interface QuickSpeakResult {
-  spoken: string;
-  alt?: string | null;
-  tip?: string | null;
-  target_lang: string;
 }

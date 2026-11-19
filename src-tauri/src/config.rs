@@ -144,6 +144,7 @@ pub struct OpenRouterConfig {
     pub base_url: String,
     pub translate_model: String,
     pub predict_model: String,
+    pub quick_translate_model: String,
     #[serde(default = "default_enable_polish")]
     pub enable_polish: bool,
 }
@@ -159,6 +160,7 @@ impl Default for OpenRouterConfig {
             base_url: "https://openrouter.ai/api/v1".to_string(),
             translate_model: "deepseek/deepseek-chat".to_string(),
             predict_model: "deepseek/deepseek-chat".to_string(),
+            quick_translate_model: String::new(),
             enable_polish: true,
         }
     }

@@ -2,7 +2,7 @@ use crate::config::OpenRouterConfig;
 use crate::domain::{LiveHearError, ReplyStrategy, ReplySuggestion};
 use crate::services::{PredictService, TranslationService};
 use async_trait::async_trait;
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
@@ -61,6 +61,49 @@ pub fn shared_http_client() -> Client {
         .clone()
 }
 
+pub(super) async fn send_chat_request(
+    request: RequestBuilder,
+    payload: &impl Serialize,
+) -> Result<Response, LiveHearError> {
+    #[derive(Serialize)]
+    struct DirectCompletion<'a, T> {
+        #[serde(flatten)]
+        payload: &'a T,
+        reasoning_effort: &'static str,
+    }
+
+    let fallback = request.try_clone();
+    let response = request
+        .json(&DirectCompletion {
+            payload,
+            reasoning_effort: "none",
+        })
+        .send()
+        .await
+        .map_err(|e| LiveHearError::NetworkError(e.to_string()))?;
+    let status = response.status();
+    if matches!(
+        status,
+        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+    ) && let Some(request) = fallback
+    {
+        let body = response.text().await.unwrap_or_default();
+        let error = body.to_ascii_lowercase();
+        if error.contains("reasoning_effort") || error.contains("reasoning.effort") {
+            return request
+                .json(payload)
+                .send()
+                .await
+                .map_err(|e| LiveHearError::NetworkError(e.to_string()));
+        }
+        return Err(LiveHearError::LlmError(format!(
+            "LLM 接口错误 ({status}): {body}"
+        )));
+    }
+
+    Ok(response)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ChatMessage {
     role: String,
@@ -80,6 +123,7 @@ struct ChatCompletionRequest {
 #[derive(Debug, Serialize, Deserialize)]
 struct ChatChoice {
     message: ChatMessage,
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -111,17 +155,6 @@ pub struct LookupResult {
     pub meaning: String,
     pub context_explanation: String,
     pub term_pair: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuickSpeakResult {
-    pub spoken: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub alt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tip: Option<String>,
-    #[serde(default)]
-    pub target_lang: String,
 }
 
 fn lang_code_to_display_name(code: &str) -> &'static str {
@@ -269,16 +302,13 @@ impl OpenRouterAdapter {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let res = self
+        let request = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
             .header("HTTP-Referer", "https://github.com/livehear/livehear")
-            .header("X-Title", "LiveHear Context Polish")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| LiveHearError::NetworkError(e.to_string()))?;
+            .header("X-Title", "LiveHear Context Polish");
+        let res = send_chat_request(request, &payload).await?;
 
         if !res.status().is_success() {
             let status = res.status();
@@ -363,14 +393,11 @@ impl OpenRouterAdapter {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let res = self
+        let request = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| LiveHearError::NetworkError(e.to_string()))?;
+            .header("Authorization", format!("Bearer {}", api_key));
+        let res = send_chat_request(request, &payload).await?;
 
         if !res.status().is_success() {
             let status = res.status();
@@ -469,14 +496,11 @@ impl OpenRouterAdapter {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let res = self
+        let request = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| LiveHearError::NetworkError(e.to_string()))?;
+            .header("Authorization", format!("Bearer {}", api_key));
+        let res = send_chat_request(request, &payload).await?;
 
         if !res.status().is_success() {
             let status = res.status();
@@ -525,10 +549,7 @@ impl OpenRouterAdapter {
         &self,
         text: &str,
         target_lang: &str,
-        recent_history: &str,
-        meeting_context: &str,
-        custom_terms: &[String],
-    ) -> Result<QuickSpeakResult, LiveHearError> {
+    ) -> Result<String, LiveHearError> {
         let api_key = self.config.api_key.trim();
         if api_key.is_empty() {
             return Err(LiveHearError::ConfigError(
@@ -536,74 +557,44 @@ impl OpenRouterAdapter {
             ));
         }
 
-        let eff_lang = if target_lang.trim().is_empty() {
-            "en"
-        } else {
-            target_lang.trim()
-        };
-        let lang_name = lang_code_to_display_name(eff_lang);
-
-        let terms_hint = if custom_terms.is_empty() {
-            String::new()
-        } else {
-            format!("\n【专有术语表】：{}", custom_terms.join(", "))
-        };
-
-        let history_hint = if recent_history.trim().is_empty() {
-            String::new()
-        } else {
-            format!("\n【最近对话上下文】：\n{}", recent_history.trim())
-        };
-
-        let prompt = format!(
-            "你是一个跨国会议现场的实时口语翻译与表达助手。\n\
-            【当前会议背景】：{}{}{}\n\
-            【我方准备开口说的原意（中文或中英夹杂）】：\"{}\"\n\n\
-            请将其转化为最地道、自然、适合在跨国会议现场直接脱口而出的【{}】口语表达。\n\
-            严禁输出任何多余解释或 Markdown 代码块，必须且仅输出如下纯 JSON 对象：\n\
-            {{\n\
-              \"spoken\": \"最自然得体、可直接照念的{}口语完整句\",\n\
-              \"alt\": \"更简短干练的口语替代表达（适合快节奏插话）\",\n\
-              \"tip\": \"核心词汇发音/重音提示或地道用法点拨（15字以内，如无可填 null）\"\n\
-            }}",
-            meeting_context, terms_hint, history_hint, text, lang_name, lang_name
-        );
-
-        let model_to_use = if !self.config.translate_model.trim().is_empty() {
-            self.config.translate_model.clone()
-        } else {
-            self.config.predict_model.clone()
-        };
-
+        let lang = lang_code_to_display_name(target_lang);
+        let model = [
+            &self.config.quick_translate_model,
+            &self.config.translate_model,
+            &self.config.predict_model,
+        ]
+        .into_iter()
+        .map(|model| model.trim())
+        .find(|model| !model.is_empty())
+        .ok_or_else(|| LiveHearError::ConfigError("请先配置秒译模型".into()))?;
         let payload = ChatCompletionRequest {
-            model: model_to_use,
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: prompt,
-            }],
+            model: model.to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: format!(
+                        "Translate the user’s text directly into {lang}. Preserve the meaning, names, numbers, and technical terms. Output only the translation."
+                    ),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: text.to_string(),
+                },
+            ],
             temperature: Some(0.2),
-            max_tokens: Some(420),
+            max_tokens: Some((text.chars().take(512).count() as u32 * 2).max(128)),
         };
 
         let url = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let res = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| LiveHearError::NetworkError(e.to_string()))?;
-
+        let res = send_chat_request(self.client.post(&url).bearer_auth(api_key), &payload).await?;
         if !res.status().is_success() {
             let status = res.status();
             let body = res.text().await.unwrap_or_default();
             return Err(LiveHearError::LlmError(format!(
-                "LLM 接口错误 ({}): {}",
-                status, body
+                "LLM 接口错误 ({status}): {body}"
             )));
         }
 
@@ -611,22 +602,19 @@ impl OpenRouterAdapter {
             .json()
             .await
             .map_err(|e| LiveHearError::SerializationError(e.to_string()))?;
-
-        let raw = data
+        let choice = data
             .choices
-            .first()
-            .map(|c| c.message.content.trim().to_string())
-            .unwrap_or_default();
-
-        let mut parsed: QuickSpeakResult = parse_model_json(&raw)?;
-        parsed.target_lang = eff_lang.to_string();
-        parsed.alt = parsed.alt.filter(|s| !s.trim().is_empty() && s != "null");
-        parsed.tip = parsed.tip.filter(|s| !s.trim().is_empty() && s != "null");
-        if !parsed.spoken.trim().is_empty() {
-            return Ok(parsed);
+            .into_iter()
+            .next()
+            .ok_or_else(|| LiveHearError::LlmError("AI 返回的口语译文为空".into()))?;
+        if choice.finish_reason.as_deref() == Some("length") {
+            return Err(LiveHearError::LlmError("AI 返回的口语译文不完整".into()));
         }
-
-        Err(LiveHearError::LlmError("AI 返回的口语译文为空".into()))
+        let translation = choice.message.content.trim();
+        if translation.is_empty() {
+            return Err(LiveHearError::LlmError("AI 返回的口语译文为空".into()));
+        }
+        Ok(translation.to_string())
     }
 
     pub async fn summarize_recent_context(
@@ -683,14 +671,11 @@ impl OpenRouterAdapter {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let res = self
+        let request = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| LiveHearError::NetworkError(e.to_string()))?;
+            .header("Authorization", format!("Bearer {}", api_key));
+        let res = send_chat_request(request, &payload).await?;
 
         if !res.status().is_success() {
             let status = res.status();
@@ -772,16 +757,13 @@ impl OpenRouterAdapter {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let res = self
+        let request = self
             .client
             .post(&url)
             // Whole-meeting summaries routinely exceed the shared client's 18s budget.
             .timeout(std::time::Duration::from_secs(90))
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| LiveHearError::NetworkError(e.to_string()))?;
+            .header("Authorization", format!("Bearer {}", api_key));
+        let res = send_chat_request(request, &payload).await?;
 
         if !res.status().is_success() {
             let status = res.status();
@@ -846,16 +828,13 @@ impl TranslationService for OpenRouterAdapter {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let res = self
+        let request = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
             .header("HTTP-Referer", "https://github.com/livehear/livehear")
-            .header("X-Title", "LiveHear Professional Translation")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| LiveHearError::NetworkError(e.to_string()))?;
+            .header("X-Title", "LiveHear Professional Translation");
+        let res = send_chat_request(request, &payload).await?;
 
         if !res.status().is_success() {
             let status = res.status();
@@ -923,14 +902,11 @@ impl PredictService for OpenRouterAdapter {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let res = self
+        let request = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| LiveHearError::NetworkError(e.to_string()))?;
+            .header("Authorization", format!("Bearer {}", api_key));
+        let res = send_chat_request(request, &payload).await?;
 
         let data: ChatCompletionResponse = res
             .json()
@@ -988,12 +964,14 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn malformed_model_output_returns_errors() {
+    async fn mock_chat(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<serde_json::Value>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for _ in 0..6 {
+            let mut bodies = Vec::new();
+            for (status, body) in responses {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 let mut buffer = [0; 4096];
@@ -1010,25 +988,102 @@ mod tests {
                                 name.eq_ignore_ascii_case("content-length")
                                     .then(|| value.trim().parse::<usize>().unwrap())
                             })
-                            .unwrap_or(0);
+                            .unwrap();
                         if request.len() >= end + 4 + length {
+                            bodies.push(
+                                serde_json::from_slice(&request[end + 4..end + 4 + length])
+                                    .unwrap(),
+                            );
                             break;
                         }
                     }
                 }
-                let body =
-                    r#"{"choices":[{"message":{"role":"assistant","content":"} ] invalid { ["}}]}"#;
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
                 );
                 socket.write_all(response.as_bytes()).await.unwrap();
             }
+            bodies
         });
+        (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn quick_translation_and_contextual_work_use_their_own_prompts() {
+        let (base_url, server) = mock_chat(vec![
+            ("400 Bad Request", r#"{"error":{"message":"Unknown parameter reasoning_effort"}}"#),
+            ("200 OK", r#"{"choices":[{"message":{"role":"assistant","content":"Don't touch the database."},"finish_reason":"stop"}]}"#),
+            ("200 OK", r#"{"choices":[{"message":{"role":"assistant","content":"Don't touch"},"finish_reason":"length"}]}"#),
+            ("200 OK", r#"{"choices":[{"message":{"role":"assistant","content":"[]"}}]}"#),
+            ("200 OK", r#"{"choices":[{"message":{"role":"assistant","content":"- Roll back the gateway"}}]}"#),
+        ]).await;
         let adapter = OpenRouterAdapter::new(OpenRouterConfig {
             api_key: "test-key".into(),
-            base_url: format!("http://{address}"),
+            base_url,
+            translate_model: "meeting-model".into(),
+            quick_translate_model: "fast-model".into(),
+            ..Default::default()
+        });
+
+        let text = "别动数据库。";
+        let result = adapter.quick_speak_translate(text, "en").await.unwrap();
+        assert_eq!(result, "Don't touch the database.");
+        assert!(
+            adapter
+                .quick_speak_translate(text, "en")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("不完整")
+        );
+        adapter
+            .generate_copilot_prompts(
+                "History to keep",
+                Some("Agree"),
+                "Release review",
+                Some("en"),
+            )
+            .await
+            .unwrap();
+        adapter
+            .generate_meeting_minutes("Transcript to keep", "Release review")
+            .await
+            .unwrap();
+
+        let mut bodies = server.await.unwrap();
+        let first = &mut bodies[0];
+        assert_eq!(first["model"], "fast-model");
+        assert_eq!(first["reasoning_effort"], "none");
+        assert_eq!(first["max_tokens"], 128);
+        let messages = first["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(
+            messages[1],
+            serde_json::json!({"role":"user","content":text})
+        );
+        first.as_object_mut().unwrap().remove("reasoning_effort");
+        assert_eq!(bodies[0], bodies[1]);
+        for (body, context) in [
+            (&bodies[3], "History to keep"),
+            (&bodies[4], "Transcript to keep"),
+        ] {
+            assert_eq!(body["model"], "meeting-model");
+            assert_eq!(body["reasoning_effort"], "none");
+            let prompt = body["messages"][0]["content"].as_str().unwrap();
+            assert!(prompt.contains(context));
+            assert!(prompt.contains("Release review"));
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_model_output_returns_errors() {
+        let body = r#"{"choices":[{"message":{"role":"assistant","content":"} ] invalid { ["}}]}"#;
+        let (base_url, server) = mock_chat(vec![("200 OK", body); 5]).await;
+        let adapter = OpenRouterAdapter::new(OpenRouterConfig {
+            api_key: "test-key".into(),
+            base_url,
             ..Default::default()
         });
         assert!(
@@ -1043,12 +1098,6 @@ mod tests {
                 .is_err()
         );
         assert!(adapter.lookup_selection("hello", "", "").await.is_err());
-        assert!(
-            adapter
-                .quick_speak_translate("你好", "en", "", "", &[])
-                .await
-                .is_err()
-        );
         assert!(
             adapter
                 .generate_copilot_prompts("hello", None, "", None)

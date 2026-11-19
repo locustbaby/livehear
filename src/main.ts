@@ -19,7 +19,7 @@ import {
   type SubtitleDisplayMode,
   type SelectionLookupData,
 } from './components/hud';
-import type { AudioDevices, FullAppConfig, QuickSpeakResult } from './types/domain';
+import type { AudioDevices, FullAppConfig } from './types/domain';
 
 function hasNativeRuntime(): boolean {
   return typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
@@ -1783,38 +1783,24 @@ class LiveHearApp {
         };
         this.refreshQuickSpeakDock('');
 
-        const recentHistory = this.hudState.subtitles
-          .filter((s) => s.original || s.translated)
-          .slice(-4)
-          .map((s) => {
-            const o = (s.original || '').trim();
-            const t = (s.translated || '').trim();
-            const roleLabel = this.formatSpeakerRoleForHistory(s);
-            return t && t !== o ? `[${roleLabel}] 原声: ${o} | 译文: ${t}` : `[${roleLabel}]: ${o}`;
-          })
-          .join('\n');
-
         try {
-          const res = await tauriInvoke<QuickSpeakResult>('quick_speak_translate', {
+          const spoken = await tauriInvoke<string>('quick_speak_translate', {
             text,
             targetLang: speakLang,
-            recentHistory,
           });
           if (requestId !== this.quickSpeakRequest) return;
           this.hudState.quickSpeakCard = {
             input: text,
-            spoken: res.spoken,
-            alt: res.alt,
-            tip: res.tip,
-            targetLang: res.target_lang || speakLang,
+            spoken,
+            targetLang: speakLang,
             loading: false,
           };
           this.refreshQuickSpeakDock();
-          if (res.spoken) {
-            const lang = (res.target_lang || speakLang).toUpperCase();
-            this.showToast(await this.copyText(res.spoken)
-              ? `✅ 已秒译为 ${lang} 并自动复制到剪贴板！`
-              : `✅ 已秒译为 ${lang}（复制到剪贴板失败）`);
+          if (spoken) {
+            const lang = speakLang.toUpperCase();
+            this.showToast(await this.copyText(spoken)
+              ? `✅ 已译为 ${lang} 并复制到剪贴板！`
+              : `✅ 已译为 ${lang}（复制到剪贴板失败）`);
           }
         } catch (err: any) {
           if (requestId !== this.quickSpeakRequest) return;
@@ -2326,6 +2312,11 @@ class LiveHearApp {
           this.appConfig.openrouter.translate_model = unifiedModel;
           this.appConfig.openrouter.predict_model = unifiedModel;
           this.appConfig.jev.model = unifiedModel;
+        }
+
+        const quickTranslateModel = document.getElementById('cfgQuickTranslateModel') as HTMLInputElement | null;
+        if (quickTranslateModel) {
+          this.appConfig.openrouter.quick_translate_model = quickTranslateModel.value.trim();
         }
 
         const polishCb = document.getElementById('cfgEnablePolish') as HTMLInputElement;

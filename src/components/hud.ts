@@ -41,8 +41,6 @@ export type SubtitleDisplayMode = 'bilingual' | 'target_only' | 'source_only';
 export interface QuickSpeakCardData {
   input: string;
   spoken: string;
-  alt?: string | null;
-  tip?: string | null;
   targetLang: string;
   loading?: boolean;
 }
@@ -826,7 +824,7 @@ export function renderQuickSpeakDockHtml(state: HudState, config?: FullAppConfig
               ? `
             <div class="qsr-loading">
               <span class="streaming-pulse-cursor"></span>
-              <span>正在转化为地道 ${escapeHtml(speakName)} 会议口语...</span>
+              <span>正在翻译为 ${escapeHtml(speakName)}…</span>
             </div>
           `
               : `
@@ -834,21 +832,6 @@ export function renderQuickSpeakDockHtml(state: HudState, config?: FullAppConfig
               <span class="qsr-spoken-text">${escapeHtml(card.spoken)}</span>
               <span class="qsr-copy-hint">${icon('copy')} 点击复制</span>
             </div>
-            ${
-              card.alt
-                ? `
-              <div class="qsr-alt-row" title="点击复制简短替代句" onclick="window.__livehear_action('copyText', '${escapeJs(card.alt)}', this)">
-                <span class="qsr-alt-tag">${icon('zap')} 简短版</span>
-                <span class="qsr-alt-text">${escapeHtml(card.alt)}</span>
-              </div>
-            `
-                : ''
-            }
-            ${
-              card.tip
-                ? `<div class="qsr-tip-row">${icon('bulb')} ${escapeHtml(card.tip)}</div>`
-                : ''
-            }
           `
           }
         </div>
@@ -1235,7 +1218,12 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
           <div class="setting-group">
             <label>AI 智囊统一模型 (Model)</label>
             <input type="text" id="cfgOpenRouterModel" value="${escapeHtml(config.openrouter.translate_model || 'deepseek/deepseek-chat')}" placeholder="deepseek/deepseek-chat" />
-            <div class="setting-tip">推荐配置低延迟模型 (如 deepseek/deepseek-chat 或 gpt-4o-mini)，保存后将同步应用于 AI 翻译、上下文润色、Jev 问句检测与应答建议生成。</div>
+            <div class="setting-tip">用于 AI 翻译、上下文润色、应答建议和会议纪要。</div>
+          </div>
+
+          <div class="setting-group">
+            <label for="cfgQuickTranslateModel">底部秒译模型（可选）</label>
+            <input type="text" id="cfgQuickTranslateModel" value="${escapeHtml(config.openrouter.quick_translate_model || '')}" placeholder="留空使用统一模型" />
           </div>
 
           <div class="setting-group">

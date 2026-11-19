@@ -1883,35 +1883,6 @@ body {
   color: #6ee7b7;
   white-space: nowrap;
 }
-.qsr-alt-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: #cbd5e1;
-  cursor: pointer;
-  padding: 2px 4px;
-  border-radius: 5px;
-}
-.qsr-alt-row:hover {
-  background: rgba(255, 255, 255, 0.06);
-  color: #ffffff;
-}
-.qsr-alt-tag {
-  font-size: 9.5px;
-  padding: 1px 5px;
-  border-radius: 4px;
-  background: rgba(56, 189, 248, 0.16);
-  color: #38bdf8;
-  font-weight: 600;
-}
-.qsr-tip-row {
-  font-size: 11px;
-  color: #fcd34d;
-  padding-left: 2px;
-}
-
-
 .raw-transcript { margin-top: 8px; color: var(--text-secondary); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .raw-transcript summary { cursor: pointer; }
 

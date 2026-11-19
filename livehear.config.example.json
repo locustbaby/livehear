@@ -26,6 +26,7 @@
     "base_url": "https://openrouter.ai/api/v1",
     "translate_model": "deepseek/deepseek-chat",
     "predict_model": "deepseek/deepseek-chat",
+    "quick_translate_model": "",
     "enable_polish": true
   },
   "jev": {

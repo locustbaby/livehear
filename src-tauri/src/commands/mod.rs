@@ -448,15 +448,12 @@ pub async fn generate_copilot_prompts(
 pub async fn quick_speak_translate(
     text: String,
     target_lang: Option<String>,
-    recent_history: Option<String>,
     container: State<'_, Arc<AppContainer>>,
-) -> Result<crate::services::ai::openrouter::QuickSpeakResult, String> {
-    let (openrouter_cfg, meeting_ctx, custom_terms, default_speak_lang) = {
+) -> Result<String, String> {
+    let (openrouter_cfg, default_speak_lang) = {
         let guard = container.config.read().await;
         (
             guard.openrouter.clone(),
-            guard.meeting.context.clone(),
-            guard.soniox.custom_terms.clone(),
             guard.soniox.speak_target_language.clone(),
         )
     };
@@ -465,13 +462,7 @@ pub async fn quick_speak_translate(
         .unwrap_or(default_speak_lang);
     let adapter = crate::services::ai::OpenRouterAdapter::new(openrouter_cfg);
     adapter
-        .quick_speak_translate(
-            &text,
-            &eff_lang,
-            recent_history.as_deref().unwrap_or(""),
-            &meeting_ctx,
-            &custom_terms,
-        )
+        .quick_speak_translate(&text, &eff_lang)
         .await
         .map_err(|e| e.to_string())
 }

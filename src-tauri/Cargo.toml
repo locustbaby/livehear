@@ -1,6 +1,6 @@
 [package]
 name = "livehear"
-version = "0.1.3"
+version = "0.1.4"
 description = "LiveHear: Lightweight Cross-Platform Live Translation & HUD Assistant"
 authors = ["livehear"]
 edition = "2024"
