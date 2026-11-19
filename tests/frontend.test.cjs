@@ -138,10 +138,10 @@ test('late quick-speak response cannot replace the latest result or a new draft'
   h.input('second');
   const second = h.app.handleAction('submitQuickSpeakTranslate');
   await tick();
-  h.requests[1].resolve({spoken:'SECOND', target_lang:'en'});
+  h.requests[1].resolve('SECOND');
   await second;
   h.input('third draft');
-  h.requests[0].resolve({spoken:'FIRST', target_lang:'en'});
+  h.requests[0].resolve('FIRST');
   await first;
   assert.equal(h.app.hudState.quickSpeakCard.spoken, 'SECOND');
   assert.equal(h.clipboard.at(-1), 'SECOND');
@@ -150,11 +150,14 @@ test('late quick-speak response cannot replace the latest result or a new draft'
 
 test('quick-speak completion preserves text typed while waiting', async () => {
   const h = harness();
+  h.app.hudState.subtitles.push(record(42));
   h.input('first');
   const job = h.app.handleAction('submitQuickSpeakTranslate');
   await tick();
+  const request = h.calls.find(call => call.cmd === 'quick_speak_translate');
+  assert.deepEqual({...request.args}, {text:'first', targetLang:'en'});
   h.input('next draft');
-  h.requests[0].resolve({spoken:'FIRST', target_lang:'en'});
+  h.requests[0].resolve('FIRST');
   await job;
   assert.equal(h.input(), 'next draft');
 });
@@ -232,7 +235,7 @@ test('closing a quick-speak card ignores its pending response', async () => {
   const job = h.app.handleAction('submitQuickSpeakTranslate');
   await tick();
   await h.app.handleAction('closeQuickSpeakCard');
-  h.requests[0].resolve({spoken:'FIRST', target_lang:'en'});
+  h.requests[0].resolve('FIRST');
   await job;
   assert.equal(h.app.hudState.quickSpeakCard, null);
   assert.equal(h.clipboard.length, 0);
@@ -284,6 +287,7 @@ test('saveAllConfig saves audio settings and synchronizes AI models', async () =
   h.elements.set('cfgEndpointSensitivity', { valueAsNumber: 0.3 });
   h.elements.set('cfgVadThreshold', { value: '3.2' });
   h.elements.set('cfgOpenRouterModel', { value: 'deepseek-v4.1-flash' });
+  h.elements.set('cfgQuickTranslateModel', { value: ' qwencloud/qwen-flash ' });
   await h.app.handleAction('saveAllConfig');
   assert.equal(h.app.appConfig.asr_backend.provider, 'ollama');
   assert.equal(h.app.appConfig.asr_backend.ollama_url, 'http://127.0.0.1:11435');
@@ -291,6 +295,7 @@ test('saveAllConfig saves audio settings and synchronizes AI models', async () =
   assert.equal(h.app.appConfig.soniox.max_endpoint_delay_ms, 600);
   const saved = h.calls.find(call => call.cmd === 'save_config').args.newConfig;
   assert.equal(saved.soniox.endpoint_sensitivity, 0.3);
+  assert.equal(saved.openrouter.quick_translate_model, 'qwencloud/qwen-flash');
   assert.equal(h.app.appConfig.soniox.vad_threshold, 3.2);
   assert.equal(h.app.appConfig.openrouter.translate_model, 'deepseek-v4.1-flash');
   assert.equal(h.app.appConfig.openrouter.predict_model, 'deepseek-v4.1-flash');

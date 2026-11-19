@@ -126,8 +126,7 @@ livehear/
      - 当检测到「我」说**中文**时：`scheduleTurnPolish` 立即调用 `translateTurnToForeign`（即 `polish_transcript(..., targetLang = speak_target_language)`），在纠偏中文原声的同时将其转化为地道的目标外语口语（如英文）并就地双语展示，方便用户直接看着屏幕照念。
      - 当检测到「我」说**英语/外语**时：保留外语原声与中文同传对照，并在 `asr-suggestions` 监听器中自动拦截过滤，绝不针对自己说的话弹出抢答建议。
 2. **常驻底部「快捷输入秒译 & 辅助发言栏」(Quick Speak Dock)**：
-   - `quick_speak_translate(text, target_lang, recent_history)`：结合最近 4 轮带角色标记（`[我 (Speaker X)]` / `[对方 (Speaker Y)]`）的对话历史、会议背景与专有术语表，在 ~600ms 内返回结构化 JSON：
-     `{"spoken": "首选地道会议口语", "alt": "简短直接替代句", "tip": "语气或发音提示", "target_lang": "en"}`，并自动写入系统剪贴板。
+   - `quick_speak_translate(text, target_lang)` 只用当前输入生成纯文本译文，并自动写入剪贴板。`quick_translate_model` 可指定独立的秒译模型。
    - `generate_copilot_prompts(recent_history, user_intent, target_lang)`：支持从底部输入框按 `Shift+Enter` 或点击任意字幕行内的态度按钮（`👍 赞同` / `⏳ 缓议` / `❓ 追问` / `💬 接话`），围绕指定单句与意图生成 3 条不同策略的目标外语发言卡片。
 3. **交互式词典与结构化纪要接口**：
    - `lookup_selection`：双击单词或划选短语时，结合所在原句与会议背景返回音标/句型、核心释义、语境潜台词解读及 `原词=译名` 术语对，支持一键热写入 `custom_terms`。
