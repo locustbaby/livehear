@@ -1,6 +1,6 @@
 # LiveHear 系统架构与技术规范 (System Architecture & Specification)
 
-本文档定义 **LiveHear** 的端到端系统架构、音频数字信号处理（DSP）管线、Soniox `stt-rt-v5` 实时双流状态机、LLM 上下文双轨精修与 Co-Pilot 协议，以及前端 60fps 零布局抖动 HUD 渲染规范。
+本文档定义 **LiveHear** 的端到端系统架构、音频数字信号处理（DSP）管线、Soniox `stt-rt-v6` 实时双流状态机、LLM 上下文双轨精修与 Co-Pilot 协议，以及前端 60fps 零布局抖动 HUD 渲染规范。
 
 ---
 
@@ -18,7 +18,7 @@ flowchart TD
     end
 
     subgraph AsrLayer["2. 流式语音识别与同传状态机 (SonioxLiveAdapter)"]
-        VadGate -->|"16kHz 16-bit Mono PCM"| SonioxWS["Soniox stt-rt-v5 WebSocket"]
+        VadGate -->|"16kHz 16-bit Mono PCM"| SonioxWS["Soniox stt-rt-v6 WebSocket"]
         SonioxWS -->|"Token Stream (text, translation_status, speaker, confidence)"| StateMachine["双流增量状态机 + 置信度门控防抖"]
     end
 
@@ -65,7 +65,7 @@ livehear/
         ├── services/                  # 核心基础设施与外部 AI 适配器
         │   ├── audio_capture.rs       # cpal 多设备采集、AudioDspPipeline 与 VadGate 环形预卷
         │   ├── asr/
-        │   │   └── soniox.rs          # Soniox stt-rt-v5 WebSocket 双流状态机与置信度防抖
+        │   │   └── soniox.rs          # Soniox stt-rt-v6 WebSocket 双流状态机与置信度防抖
         │   └── ai/
         │       ├── openrouter.rs      # LLM 双轨上下文纠偏、我方中文转外语口语、快捷输入秒译、划词精译、提词与纪要
         │       └── jev.rs             # Jev 毫秒级意图分类网关与本地启发式降级
@@ -94,10 +94,11 @@ livehear/
 
 ---
 
-### 3.2 Soniox `stt-rt-v5` 双流状态机与防抖规范 ([`soniox.rs`](file:///Users/sexy/Documents/GitHub/livehear/src-tauri/src/services/asr/soniox.rs))
+### 3.2 Soniox `stt-rt-v6` 双流状态机与防抖规范 ([`soniox.rs`](file:///Users/sexy/Documents/GitHub/livehear/src-tauri/src/services/asr/soniox.rs))
 
 1. **WebSocket 握手协议**：
-   - 支持 `model: "stt-rt-v5"`，音频格式固定为 `pcm_s16le`（16kHz 单声道）。
+   - 支持 `model: "stt-rt-v6"`，音频格式固定为 `pcm_s16le`（16kHz 单声道）。
+   - `max_endpoint_delay_ms` 设置断句等待上限，`endpoint_sensitivity` 调整语义断句的触发倾向。
    - `language_hints` 配合 `language_hints_strict: true` 将声学解码空间严格收敛在用户指定的语种集合内。
    - `context` 同时注入会议主题 (`general.topic`)、声学偏置术语表 (`terms`) 与专有译名映射 (`translation_terms`)。
    - `translation` 支持：

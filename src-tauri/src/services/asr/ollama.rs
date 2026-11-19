@@ -119,8 +119,8 @@ fn parse_output(content: &str) -> (Option<String>, String) {
 
 #[async_trait]
 impl ASRService for OllamaAsr {
-    fn drain_on_stop(&self) -> bool {
-        true
+    fn stop_drain_timeout(&self) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(90))
     }
 
     async fn test_connection(&self) -> Result<String, LiveHearError> {

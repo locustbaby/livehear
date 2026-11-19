@@ -5,12 +5,14 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
+pub const SONIOX_REALTIME_MODEL: &str = "stt-rt-v6";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SonioxConfig {
     pub api_key: String,
     pub ws_url: String,
+    #[serde(deserialize_with = "deserialize_soniox_model")]
     pub model: String,
     pub sample_rate: u32,
     pub enable_speaker_diarization: bool,
@@ -44,6 +46,16 @@ pub struct SonioxConfig {
     pub vad_threshold: f32,
     #[serde(default)]
     pub input_device: Option<String>,
+}
+
+fn deserialize_soniox_model<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let model = String::deserialize(deserializer)?;
+    Ok(match model.trim() {
+        "" | "stt-rt-v3" | "stt-rt-v4" | "stt-rt-v5" => SONIOX_REALTIME_MODEL.to_string(),
+        model => model.to_string(),
+    })
 }
 
 fn default_enable_endpoint_detection() -> bool {
@@ -103,7 +115,7 @@ impl Default for SonioxConfig {
         Self {
             api_key: String::new(),
             ws_url: "wss://stt-rt.soniox.com/transcribe-websocket".to_string(),
-            model: "stt-rt-v5".to_string(),
+            model: SONIOX_REALTIME_MODEL.to_string(),
             sample_rate: 16000,
             enable_speaker_diarization: true,
             enable_endpoint_detection: true,
@@ -116,7 +128,7 @@ impl Default for SonioxConfig {
             language_a: "en".to_string(),
             language_b: "zh".to_string(),
             max_endpoint_delay_ms: 2000,
-            endpoint_sensitivity: -0.2,
+            endpoint_sensitivity: default_endpoint_sensitivity(),
             custom_terms: vec![],
             enable_vad: true,
             vad_threshold: 1.8,
@@ -409,9 +421,22 @@ mod tests {
             serde_json::from_str(r#"{"soniox":{"api_key":"k"},"openrouter":{"api_key":"o"}}"#)
                 .unwrap();
         assert_eq!(parsed.soniox.api_key, "k");
+        assert_eq!(parsed.soniox.model, "stt-rt-v6");
         assert_eq!(parsed.soniox.sample_rate, 16000);
         assert_eq!(parsed.openrouter.api_key, "o");
         assert_eq!(parsed.jev.model, JevConfig::default().model);
         assert!(parsed.meeting.auto_predict);
+    }
+
+    #[test]
+    fn legacy_soniox_models_upgrade_when_config_is_loaded() {
+        for model in ["", "stt-rt-v3", "stt-rt-v4", "stt-rt-v5", "stt-rt-v6"] {
+            let config: AppConfig =
+                serde_json::from_value(serde_json::json!({"soniox": {"model": model}})).unwrap();
+            assert_eq!(config.soniox.model, "stt-rt-v6");
+        }
+        let config: AppConfig =
+            serde_json::from_str(r#"{"soniox":{"model":"custom-soniox"}}"#).unwrap();
+        assert_eq!(config.soniox.model, "custom-soniox");
     }
 }

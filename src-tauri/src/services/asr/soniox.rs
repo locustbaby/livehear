@@ -1,20 +1,23 @@
-use crate::config::SonioxConfig;
+use crate::config::{SONIOX_REALTIME_MODEL, SonioxConfig};
 use crate::domain::{LiveHearError, Speaker, TranscriptSegment};
 use crate::services::ASRService;
 use crate::services::audio_capture::VAD_FINALIZE_SIGNAL;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{HeaderValue, header::AUTHORIZATION};
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
 const SONIOX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const SONIOX_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const SONIOX_FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SonioxTranslationPayload {
@@ -64,6 +67,8 @@ struct SonioxStartPayload {
     enable_endpoint_detection: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_endpoint_delay_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint_sensitivity: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     enable_language_identification: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -142,30 +147,35 @@ impl SonioxLiveAdapter {
     fn build_context_payload(&self) -> Option<SonioxContextPayload> {
         let mut terms = Vec::new();
         let mut translation_terms = Vec::new();
+        let mut seen_terms = HashSet::new();
+        let mut seen_translations = HashSet::new();
 
         for raw in &self.config.custom_terms {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            if let Some((src, tgt)) = trimmed
+            let mapping = trimmed
                 .split_once('=')
                 .or_else(|| trimmed.split_once("->"))
                 .or_else(|| trimmed.split_once('：'))
                 .or_else(|| trimmed.split_once(':'))
-            {
-                let s = src.trim();
-                let t = tgt.trim();
-                if !s.is_empty() && !t.is_empty() {
-                    terms.push(s.to_string());
+                .map(|(source, target)| (source.trim(), target.trim()))
+                .filter(|(source, target)| !source.is_empty() && !target.is_empty());
+            let term = if let Some((source, target)) = mapping {
+                if seen_translations.insert((source, target)) {
                     translation_terms.push(SonioxTranslationTerm {
-                        source: s.to_string(),
-                        target: t.to_string(),
+                        source: source.to_string(),
+                        target: target.to_string(),
                     });
-                    continue;
                 }
+                source
+            } else {
+                trimmed
+            };
+            if seen_terms.insert(term) {
+                terms.push(term.to_string());
             }
-            terms.push(trimmed.to_string());
         }
 
         let mut general = Vec::new();
@@ -242,6 +252,9 @@ impl SonioxLiveAdapter {
             } else {
                 None
             },
+            endpoint_sensitivity: (self.config.enable_endpoint_detection
+                && self.config.model == SONIOX_REALTIME_MODEL)
+                .then(|| self.config.endpoint_sensitivity.clamp(-1.0, 1.0)),
             enable_language_identification: Some(true),
             language_hints: if self.config.language_hints.is_empty() {
                 None
@@ -724,8 +737,8 @@ impl UtteranceState {
 
 #[async_trait]
 impl ASRService for SonioxLiveAdapter {
-    fn drain_on_stop(&self) -> bool {
-        true
+    fn stop_drain_timeout(&self) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(8))
     }
 
     async fn test_connection(&self) -> Result<String, LiveHearError> {
@@ -758,27 +771,53 @@ impl ASRService for SonioxLiveAdapter {
         let json = serde_json::to_string(&init_payload)
             .map_err(|e| LiveHearError::SerializationError(e.to_string()))?;
 
-        ws_stream
-            .send(Message::Text(json.into()))
-            .await
-            .map_err(|e| LiveHearError::NetworkError(format!("发送初始化指令失败: {}", e)))?;
+        // Soniox rejects streams with no audio. Probe with 100 ms of synthetic PCM silence.
+        let silence = vec![0; init_payload.sample_rate as usize / 10 * 2];
+        tokio::time::timeout(SONIOX_CONNECT_TIMEOUT, async {
+            for message in [
+                Message::Text(json.into()),
+                Message::Binary(silence.into()),
+                Message::Text("".into()),
+            ] {
+                ws_stream.send(message).await.map_err(|e| {
+                    LiveHearError::NetworkError(format!("发送 Soniox 测试请求失败: {e}"))
+                })?;
+            }
 
-        // 发送空音频帧触发握手校验
-        let _ = ws_stream.send(Message::Binary(vec![].into())).await;
-
-        if let Ok(Some(Ok(Message::Text(resp_text)))) =
-            tokio::time::timeout(SONIOX_CONNECT_TIMEOUT, ws_stream.next()).await
-            && let Ok(resp) = serde_json::from_str::<SonioxStreamResponse>(&resp_text)
-            && let Some(err) = resp.error_message
-        {
-            return Err(LiveHearError::NetworkError(format!("Soniox 错误: {}", err)));
-        }
-
-        let _ = ws_stream.close(None).await;
-        Ok(
-            "Soniox WebSocket (stt-rt-v5 语义断句 + 说话人分离 + 实时流式同传) 连通成功！"
-                .to_string(),
-        )
+            while let Some(frame) = ws_stream.next().await {
+                let frame = frame.map_err(|e| {
+                    LiveHearError::NetworkError(format!("读取 Soniox 测试响应失败: {e}"))
+                })?;
+                match frame {
+                    Message::Text(text) => {
+                        let response: SonioxStreamResponse =
+                            serde_json::from_str(&text).map_err(|e| {
+                                LiveHearError::SerializationError(format!(
+                                    "无效的 Soniox 测试响应: {e}"
+                                ))
+                            })?;
+                        if let Some(error) = response.error_message {
+                            return Err(LiveHearError::NetworkError(format!(
+                                "Soniox 错误: {error}"
+                            )));
+                        }
+                        if let Some(code) = response.error_code {
+                            return Err(LiveHearError::NetworkError(format!("Soniox 错误 {code}")));
+                        }
+                        if response.finished == Some(true) {
+                            return Ok(format!("Soniox {} 连通成功", init_payload.model));
+                        }
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+            Err(LiveHearError::NetworkError(
+                "Soniox 在确认测试完成前关闭了连接".into(),
+            ))
+        })
+        .await
+        .map_err(|_| LiveHearError::NetworkError("等待 Soniox 确认测试完成超时".into()))?
     }
 
     async fn start_stream(
@@ -829,49 +868,53 @@ impl ASRService for SonioxLiveAdapter {
 
         let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(128);
         let (event_tx, event_rx) = broadcast::channel::<TranscriptSegment>(256);
+        let (input_finished, input_finished_rx) = oneshot::channel();
 
         let last_chunk_sent = Arc::new(Mutex::new(tokio::time::Instant::now()));
         let last_chunk_sent_write = last_chunk_sent.clone();
         let last_chunk_sent_read = last_chunk_sent.clone();
 
         // 异步写任务：向 Soniox 传输 PCM 音频、VAD 静默手动 Finalize 指令，以及 8 秒周期的官方 JSON keepalive
-        tokio::spawn(async move {
+        let writer_task = tokio::spawn(async move {
             let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(8));
             keepalive_interval.tick().await;
 
             loop {
-                tokio::select! {
+                let message = tokio::select! {
                     chunk_opt = audio_rx.recv() => {
                         match chunk_opt {
+                            Some(chunk) if chunk.as_slice() == [VAD_FINALIZE_SIGNAL] => {
+                                Message::Text(r#"{"type":"finalize","trailing_silence_ms":300}"#.into())
+                            }
                             Some(chunk) => {
-                                if chunk.len() == 1 && chunk[0] == VAD_FINALIZE_SIGNAL {
-                                    // VAD 检测到发言结束进入静默：向 Soniox 发送官方 finalize 控制消息，立即锁定挂起词与译文
-                                    let finalize_msg = r#"{"type":"finalize","trailing_silence_ms":300}"#;
-                                    if write.send(Message::Text(finalize_msg.into())).await.is_err() {
-                                        break;
-                                    }
-                                    continue;
-                                }
                                 if let Ok(mut l) = last_chunk_sent_write.lock() {
                                     *l = tokio::time::Instant::now();
                                 }
-                                if write.send(Message::Binary(chunk.into())).await.is_err() {
-                                    break;
-                                }
+                                Message::Binary(chunk.into())
                             }
                             None => break,
                         }
                     }
                     _ = keepalive_interval.tick() => {
-                        // 遵循 Soniox 官方文档：静默期每 8 秒发送 {"type":"keepalive"} 防止 20 秒 408 超时断连
-                        let keepalive_msg = r#"{"type":"keepalive"}"#;
-                        if write.send(Message::Text(keepalive_msg.into())).await.is_err() {
-                            break;
-                        }
+                        Message::Text(r#"{"type":"keepalive"}"#.into())
                     }
+                };
+                if !matches!(
+                    tokio::time::timeout(SONIOX_SEND_TIMEOUT, write.send(message)).await,
+                    Ok(Ok(()))
+                ) {
+                    return;
                 }
             }
-            let _ = write.send(Message::Binary(vec![].into())).await;
+
+            // Soniox treats empty binary frames as audio; an empty text frame ends input.
+            if matches!(
+                tokio::time::timeout(SONIOX_SEND_TIMEOUT, write.send(Message::Text("".into())))
+                    .await,
+                Ok(Ok(()))
+            ) {
+                let _ = input_finished.send(());
+            }
         });
 
         let enable_translation = self.config.enable_translation;
@@ -884,6 +927,13 @@ impl ASRService for SonioxLiveAdapter {
             let mut state = UtteranceState::new(enable_translation, translation_type, target_lang);
             let mut last_latency_emit = tokio::time::Instant::now();
             let mut smoothed_latency_ms: u64 = 65;
+            let mut check_receiver = tokio::time::interval(std::time::Duration::from_secs(1));
+            let finish_deadline = async {
+                if input_finished_rx.await.is_ok() {
+                    tokio::time::sleep(SONIOX_FINISH_TIMEOUT).await;
+                }
+            };
+            tokio::pin!(finish_deadline);
 
             loop {
                 let endpoint_timeout = state.endpoint_pending_since.map(|since| {
@@ -907,6 +957,17 @@ impl ASRService for SonioxLiveAdapter {
                 });
 
                 tokio::select! {
+                    _ = &mut finish_deadline => {
+                        if let Some(ref app) = app_handle_read {
+                            let _ = app.emit("asr-error", "Soniox 收尾未完成，已保留收到的字幕");
+                        }
+                        break;
+                    }
+                    _ = check_receiver.tick() => {
+                        if event_tx.receiver_count() == 0 {
+                            break;
+                        }
+                    }
                     _ = async {
                         if let Some(wait_dur) = endpoint_timeout {
                             tokio::time::sleep(wait_dur).await;
@@ -1065,6 +1126,7 @@ impl ASRService for SonioxLiveAdapter {
                 }
             }
 
+            writer_task.abort();
             if state.has_final_content() || !state.last_prov_orig.trim().is_empty() {
                 state.commit_current_utterance("流关闭尾部结句", &event_tx);
             }
@@ -1305,14 +1367,177 @@ fn process_token_batch(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn connection_test_requires_provider_completion() {
+        for (response, expected) in [
+            (
+                Some(r#"{"finished":true}"#),
+                Ok("Soniox stt-rt-v6 连通成功"),
+            ),
+            (
+                Some(r#"{"error_code":400,"error_message":"Model unavailable"}"#),
+                Err("Model unavailable"),
+            ),
+            (None, Err("确认测试完成前关闭")),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                let Message::Text(init) = socket.next().await.unwrap().unwrap() else {
+                    panic!("expected a Soniox configuration frame");
+                };
+                let payload: SonioxStartPayload = serde_json::from_str(&init).unwrap();
+                assert_eq!(payload.model, "stt-rt-v6");
+                assert!(matches!(
+                    socket.next().await.unwrap().unwrap(),
+                    Message::Binary(pcm) if pcm.len() == 3200 && pcm.iter().all(|&byte| byte == 0)
+                ));
+                assert!(matches!(
+                    socket.next().await.unwrap().unwrap(), Message::Text(end) if end.is_empty()
+                ));
+                socket
+                    .send(Message::Text(r#"{"tokens":[]}"#.into()))
+                    .await
+                    .unwrap();
+                if let Some(response) = response {
+                    socket.send(Message::Text(response.into())).await.unwrap();
+                } else {
+                    socket.close(None).await.unwrap();
+                }
+            });
+            let adapter = SonioxLiveAdapter::new(
+                SonioxConfig {
+                    api_key: "test".into(),
+                    ws_url: url,
+                    ..SonioxConfig::default()
+                },
+                None,
+            );
+            let result = adapter.test_connection().await;
+            server.await.unwrap();
+            match expected {
+                Ok(message) => assert_eq!(result.unwrap(), message),
+                Err(message) => assert!(result.unwrap_err().to_string().contains(message)),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stopping_sends_an_empty_text_frame_and_flushed_tail_even_without_ack() {
+        for acknowledge in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                assert!(
+                    matches!(socket.next().await.unwrap().unwrap(), Message::Text(init) if !init.is_empty())
+                );
+                assert!(
+                    matches!(socket.next().await.unwrap().unwrap(), Message::Binary(audio) if !audio.is_empty())
+                );
+                assert!(
+                    matches!(socket.next().await.unwrap().unwrap(), Message::Text(end) if end.is_empty())
+                );
+                let response = serde_json::json!({
+                    "tokens": [{"text": "Tail", "is_final": acknowledge, "speaker": "1"}],
+                    "finished": acknowledge,
+                });
+                socket
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .unwrap();
+                let _ = socket.next().await;
+            });
+            let adapter = SonioxLiveAdapter::new(
+                SonioxConfig {
+                    api_key: "test".into(),
+                    ws_url: url,
+                    enable_translation: false,
+                    ..SonioxConfig::default()
+                },
+                None,
+            );
+            let (audio, mut segments) = adapter.start_stream().await.unwrap();
+            audio.send(vec![0, 0]).await.unwrap();
+            drop(audio);
+            let deadline = std::time::Duration::from_secs(2)
+                + if acknowledge {
+                    std::time::Duration::ZERO
+                } else {
+                    SONIOX_FINISH_TIMEOUT
+                };
+            tokio::time::timeout(deadline, async {
+                let mut final_text = None;
+                while let Ok(segment) = segments.recv().await {
+                    if segment.is_final {
+                        final_text = Some(segment.text);
+                    }
+                }
+                assert_eq!(final_text.as_deref(), Some("Tail"));
+                server.await.unwrap();
+            })
+            .await
+            .unwrap();
+        }
+    }
+
     #[test]
     fn default_stream_requests_native_english_chinese_translation() {
         let adapter = SonioxLiveAdapter::new(SonioxConfig::default(), None);
-        let translation = adapter.build_start_payload().translation.unwrap();
+        let payload = adapter.build_start_payload();
+        assert_eq!(payload.model, "stt-rt-v6");
+        assert_eq!(payload.endpoint_sensitivity, Some(-0.2));
+        let translation = payload.translation.unwrap();
         assert_eq!(translation.translation_type, "two_way");
         assert_eq!(translation.language_a.as_deref(), Some("en"));
         assert_eq!(translation.language_b.as_deref(), Some("zh"));
         assert!(translation.target_language.is_none());
+    }
+
+    #[test]
+    fn stream_bounds_endpoint_sensitivity_and_omits_it_without_endpoint_detection() {
+        let mut config = SonioxConfig {
+            endpoint_sensitivity: 2.0,
+            ..SonioxConfig::default()
+        };
+        let adapter = SonioxLiveAdapter::new(config.clone(), None);
+        assert_eq!(
+            adapter.build_start_payload().endpoint_sensitivity,
+            Some(1.0)
+        );
+
+        config.enable_endpoint_detection = false;
+        let adapter = SonioxLiveAdapter::new(config, None);
+        let payload = serde_json::to_value(adapter.build_start_payload()).unwrap();
+        assert!(payload.get("endpoint_sensitivity").is_none());
+        assert!(payload.get("max_endpoint_delay_ms").is_none());
+    }
+
+    #[test]
+    fn glossary_deduplicates_terms_and_mappings_without_folding_case() {
+        let adapter = SonioxLiveAdapter::new(
+            SonioxConfig {
+                custom_terms: [
+                    " SLA ",
+                    "SLA=服务级别协议",
+                    "SLA -> 服务级别协议",
+                    "sla",
+                    "",
+                ]
+                .map(String::from)
+                .to_vec(),
+                ..SonioxConfig::default()
+            },
+            None,
+        );
+        let context = adapter.build_start_payload().context.unwrap();
+        assert_eq!(context.terms, ["SLA", "sla"]);
+        assert_eq!(context.translation_terms.len(), 1);
+        assert_eq!(context.translation_terms[0].source, "SLA");
+        assert_eq!(context.translation_terms[0].target, "服务级别协议");
     }
 
     fn make_token(

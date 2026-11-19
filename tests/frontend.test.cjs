@@ -275,12 +275,13 @@ test('binding my speaker leaves live Chinese translation to Soniox and manual EN
   assert.equal(h.clipboard.at(-1), "Hello, we'll meet tomorrow.");
 });
 
-test('saveAllConfig synchronizes AI models and preserves endpoint delay, vad_threshold, and ollama config', async () => {
+test('saveAllConfig saves audio settings and synchronizes AI models', async () => {
   const h = harness();
   h.elements.set('cfgAsrProvider', { value: 'ollama' });
   h.elements.set('cfgOllamaUrl', { value: 'http://127.0.0.1:11435' });
   h.elements.set('cfgOllamaModel', { value: 'qwen3-asr-custom' });
   h.elements.set('cfgEndpointDelay', { value: '600' });
+  h.elements.set('cfgEndpointSensitivity', { valueAsNumber: 0.3 });
   h.elements.set('cfgVadThreshold', { value: '3.2' });
   h.elements.set('cfgOpenRouterModel', { value: 'deepseek-v4.1-flash' });
   await h.app.handleAction('saveAllConfig');
@@ -288,6 +289,8 @@ test('saveAllConfig synchronizes AI models and preserves endpoint delay, vad_thr
   assert.equal(h.app.appConfig.asr_backend.ollama_url, 'http://127.0.0.1:11435');
   assert.equal(h.app.appConfig.asr_backend.ollama_model, 'qwen3-asr-custom');
   assert.equal(h.app.appConfig.soniox.max_endpoint_delay_ms, 600);
+  const saved = h.calls.find(call => call.cmd === 'save_config').args.newConfig;
+  assert.equal(saved.soniox.endpoint_sensitivity, 0.3);
   assert.equal(h.app.appConfig.soniox.vad_threshold, 3.2);
   assert.equal(h.app.appConfig.openrouter.translate_model, 'deepseek-v4.1-flash');
   assert.equal(h.app.appConfig.openrouter.predict_model, 'deepseek-v4.1-flash');
@@ -489,4 +492,46 @@ test('a start issued while a stop is draining runs after the stop instead of bei
   finishStop();
   await Promise.all([stop, start]);
   assert.deepEqual(order, ['stop', 'start']);
+});
+
+test('stopping preserves the tail and permits a restart while the meeting summary is pending', async () => {
+  const h = harness();
+  const button = {};
+  h.elements.set('btnToggleLive', button);
+  h.app.hudState.isStreaming = true;
+  h.app.appConfig.openrouter.api_key = 'test';
+  h.app.appConfig.meeting.context = 'Before stop';
+  h.app.pushSubtitleWithCap(record(1));
+  h.app.pushSubtitleWithCap({ ...record(2), isPartial: true });
+  h.app.polishJobs.add(new Promise(() => {}));
+  let completeSummary;
+  const summaryRequested = new Promise(resolve => {
+    h.overrides.set('generate_ai_minutes', () => new Promise(finish => {
+      completeSummary = finish;
+      resolve();
+    }));
+  });
+  h.overrides.set('stop_soniox_live', async () => { throw Error('stop deadline reached'); });
+
+  const stop = h.app.stopLiveStream();
+  await tick();
+  assert.equal(button.disabled, true);
+  assert.match(button.innerHTML, /正在处理尾段/);
+  await stop;
+  await summaryRequested;
+  assert.equal(button.disabled, false);
+  assert.match(button.innerHTML, /开始同传/);
+  assert.equal(h.app.hudState.subtitles[1].isPartial, false);
+  assert.equal(h.app.polishJobs.size, 0);
+  await h.app.startLiveStream();
+  assert.equal(h.app.hudState.isStreaming, true);
+
+  h.app.appConfig.meeting.context = 'Next meeting';
+  h.app.pushSubtitleWithCap(record(3));
+  completeSummary('Meeting summary');
+  await Promise.all([...h.app.pendingAutoSaves]);
+  const saved = h.calls.find(({ cmd }) => cmd === 'save_meeting_transcript').args.content;
+  assert.match(saved, /Before stop/);
+  assert.match(saved, /RECORD_2_END/);
+  assert.doesNotMatch(saved, /RECORD_3_END|Next meeting/);
 });

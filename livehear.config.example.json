@@ -2,7 +2,7 @@
   "soniox": {
     "api_key": "YOUR_SONIOX_API_KEY",
     "ws_url": "wss://stt-rt.soniox.com/transcribe-websocket",
-    "model": "stt-rt-v5",
+    "model": "stt-rt-v6",
     "sample_rate": 16000,
     "enable_speaker_diarization": true,
     "enable_endpoint_detection": true,
