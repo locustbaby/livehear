@@ -65,6 +65,16 @@ async fn stop_audio_input(
     *sender.lock().await = None;
 }
 
+async fn join_stream_task(task: &mut Option<tokio::task::JoinHandle<()>>) -> bool {
+    let Some(handle) = task.as_mut() else {
+        return true;
+    };
+    // Only keep the handle if the wait is cancelled while the task is pending.
+    let result = handle.await;
+    *task = None;
+    result.is_ok()
+}
+
 pub(crate) async fn finish_audio_stream(
     capture: &tokio::sync::Mutex<NativeAudioCapture>,
     sender: &tokio::sync::Mutex<Option<mpsc::Sender<Vec<u8>>>>,
@@ -385,50 +395,32 @@ impl LiveHearOrchestrator {
     }
 
     pub async fn stop(&self) -> bool {
-        let mut complete = true;
-        let should_drain = self.asr_service.drain_on_stop();
-        self.draining.store(should_drain, Ordering::SeqCst);
-        if !should_drain {
+        let drain_timeout = self.asr_service.stop_drain_timeout();
+        self.draining
+            .store(drain_timeout.is_some(), Ordering::SeqCst);
+        if drain_timeout.is_none() {
             self.is_running.store(false, Ordering::SeqCst);
             self.stop_notify.notify_waiters();
         }
         stop_audio_input(&self.audio_capture, &self.audio_tx).await;
         let mut stream_task = self.stream_task.lock().await.take();
         let mut final_task = self.final_task.lock().await.take();
-        if should_drain {
-            let drained = tokio::time::timeout(std::time::Duration::from_secs(90), async {
-                if let Some(task) = stream_task.as_mut() {
-                    let _ = task.await;
-                }
-                if let Some(task) = final_task.as_mut() {
-                    let _ = task.await;
-                }
+        let complete = if let Some(timeout) = drain_timeout {
+            tokio::time::timeout(timeout, async {
+                let stream_closed = join_stream_task(&mut stream_task).await;
+                let final_closed = join_stream_task(&mut final_task).await;
+                stream_closed && final_closed
             })
-            .await;
-            if drained.is_err() {
-                complete = false;
-                self.is_running.store(false, Ordering::SeqCst);
-                self.stop_notify.notify_waiters();
-                if let Some(task) = stream_task {
-                    task.abort();
-                    let _ = task.await;
-                }
-                if let Some(task) = final_task {
-                    task.abort();
-                    let _ = task.await;
-                }
-            }
+            .await
+            .unwrap_or(false)
         } else {
-            if let Some(task) = stream_task {
-                task.abort();
-                let _ = task.await;
-            }
-            if let Some(task) = final_task {
-                task.abort();
-                let _ = task.await;
-            }
-        }
+            true
+        };
         self.is_running.store(false, Ordering::SeqCst);
+        for task in [stream_task, final_task].into_iter().flatten() {
+            task.abort();
+            let _ = task.await;
+        }
         self.draining.store(false, Ordering::SeqCst);
         complete
     }
@@ -438,6 +430,22 @@ impl LiveHearOrchestrator {
 mod tests {
     use super::*;
     struct SlowTranslator;
+
+    #[tokio::test]
+    async fn a_tail_timeout_leaves_only_unfinished_tasks_to_abort() {
+        let mut stream = Some(tokio::spawn(async {}));
+        let mut tail = Some(tokio::spawn(std::future::pending()));
+        let result = tokio::time::timeout(std::time::Duration::from_millis(50), async {
+            assert!(join_stream_task(&mut stream).await);
+            join_stream_task(&mut tail).await
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(stream.is_none());
+        let tail = tail.unwrap();
+        tail.abort();
+        assert!(tail.await.unwrap_err().is_cancelled());
+    }
 
     #[async_trait::async_trait]
     impl TranslationService for SlowTranslator {

@@ -4,13 +4,14 @@ pub mod audio_capture;
 
 use crate::domain::{JevDecision, LiveHearError, ReplySuggestion, TranscriptSegment};
 use async_trait::async_trait;
+use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 
 /// 实时 ASR 语音识别服务抽象 (Strategy Pattern)
 #[async_trait]
 pub trait ASRService: Send + Sync {
-    fn drain_on_stop(&self) -> bool {
-        false
+    fn stop_drain_timeout(&self) -> Option<Duration> {
+        None
     }
 
     /// 建立流式识别管道：返回用于写入 PCM 音频的 Sender，以及订阅转录结果的 Receiver

@@ -3,6 +3,7 @@ use serde_json::json;
 use std::fs::File;
 use std::io::Read;
 use std::time::Duration;
+use tauri_app_lib::config::SONIOX_REALTIME_MODEL;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::http::Request;
@@ -34,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 发送配置
     let config = json!({
-        "model": "stt-rt-v5",
+        "model": SONIOX_REALTIME_MODEL,
         "audio_format": "pcm_s16le",
         "sample_rate": 16000,
         "num_channels": 1,
@@ -92,8 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    // 发送空 binary 标记音频结束 (Soniox EOF)
-    write.send(Message::Binary(vec![].into())).await?;
+    write.send(Message::Text("".into())).await?;
     println!("📤 全部发送完毕 (已发送 EOF 空包)，等待服务端处理与返回...");
 
     tokio::time::sleep(Duration::from_millis(5000)).await;

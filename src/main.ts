@@ -245,7 +245,7 @@ class LiveHearApp {
     soniox: {
       api_key: '',
       ws_url: 'wss://stt-rt.soniox.com/transcribe-websocket',
-      model: 'stt-rt-v5',
+      model: 'stt-rt-v6',
       sample_rate: 16000,
       enable_speaker_diarization: true,
       language_hints: ['en', 'zh'],
@@ -257,6 +257,7 @@ class LiveHearApp {
       language_a: 'en',
       language_b: 'zh',
       max_endpoint_delay_ms: 2000,
+      endpoint_sensitivity: -0.2,
       custom_terms: [],
       enable_vad: true,
       vad_threshold: 1.8,
@@ -1247,11 +1248,11 @@ class LiveHearApp {
           : `✅ 已译为 ${speakUpper}（复制到剪贴板失败）`);
       }
     } catch (err: any) {
-      if (!silent) {
+      if (!silent && sessionEpoch === this.streamEpoch) {
         this.showToast(`⚠️ 翻译失败: ${err?.message || err}`);
       }
     } finally {
-      this.translatingTurnIds.delete(turnId);
+      if (sessionEpoch === this.streamEpoch) this.translatingTurnIds.delete(turnId);
     }
   }
 
@@ -1527,10 +1528,10 @@ class LiveHearApp {
         break;
 
       case 'closeWindow':
-        this.isClosing = true;
-        if (this.hudState.isStreaming) {
+        if (this.hudState.isStreaming || this.pendingStop) {
           await this.stopLiveStream(true);
         }
+        await Promise.allSettled(this.pendingAutoSaves);
         try {
           await tauriInvoke('close_window');
         } catch {}
@@ -2258,6 +2259,11 @@ class LiveHearApp {
           }
         }
 
+        const endpointSensitivityInput = document.getElementById('cfgEndpointSensitivity') as HTMLInputElement | null;
+        if (endpointSensitivityInput && Number.isFinite(endpointSensitivityInput.valueAsNumber)) {
+          this.appConfig.soniox.endpoint_sensitivity = Math.max(-1, Math.min(1, endpointSensitivityInput.valueAsNumber));
+        }
+
         const diarizationCheckbox = document.getElementById('cfgSpeakerDiarization') as HTMLInputElement;
         if (diarizationCheckbox) {
           this.appConfig.soniox.enable_speaker_diarization = diarizationCheckbox.checked;
@@ -2446,7 +2452,7 @@ class LiveHearApp {
     }
   }
 
-  private async fetchAiExecutiveSummary(subtitles = this.hudState.subtitles): Promise<string> {
+  private async fetchAiExecutiveSummary(subtitles = this.hudState.subtitles, timeoutMs = 95000): Promise<string> {
     if (!this.appConfig.openrouter?.api_key?.trim() || subtitles.length < 2) {
       return '';
     }
@@ -2460,22 +2466,32 @@ class LiveHearApp {
           : `[${s.timestamp}] ${s.speaker}: ${o}`;
       })
       .join('\n');
-    // Closing the window must not hang on a stalled LLM call.
-    const timeoutMs = this.isClosing ? 12000 : 95000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const summary = await Promise.race([
         tauriInvoke<string>('generate_ai_minutes', { transcript: rawLines }),
-        new Promise<string>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
+        new Promise<string>((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), timeoutMs); }),
       ]);
       return summary ? summary.trim() : '';
     } catch (e) {
       console.warn('AI 结构化纪要提炼跳过:', e);
       return '';
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
-  private generateTranscriptText(aiSummary = '', subtitles = this.hudState.subtitles): string {
-    const now = new Date();
+  private transcriptMetadata() {
+    return {
+      now: new Date(),
+      context: this.appConfig.meeting.context,
+      localAsr: this.appConfig.asr_backend?.provider === 'ollama',
+      suggestions: [...this.hudState.suggestions],
+    };
+  }
+
+  private generateTranscriptText(aiSummary = '', subtitles = this.hudState.subtitles, metadata = this.transcriptMetadata()): string {
+    const { now, context, suggestions } = metadata;
     const dateStr = now.toLocaleDateString();
     const timeStr = now.toLocaleTimeString();
 
@@ -2487,7 +2503,7 @@ class LiveHearApp {
     lines.push('================================================================================');
     lines.push('LiveHear 会议速记与双语同传纪要');
     lines.push(`记录时间: ${dateStr} ${timeStr}`);
-    lines.push(`会议主题: ${this.appConfig.meeting.context || '日常同步'}`);
+    lines.push(`会议主题: ${context || '日常同步'}`);
     lines.push(`参会发言人: ${distinctSpeakers || '未知'}`);
     lines.push('================================================================================\n');
 
@@ -2515,10 +2531,10 @@ class LiveHearApp {
       lines.push('');
     }
 
-    if (this.hudState.suggestions.length > 0) {
+    if (suggestions.length > 0) {
       lines.push('--------------------------------------------------------------------------------');
       lines.push('【智能决策与策略提炼】\n');
-      for (const sug of this.hudState.suggestions) {
+      for (const sug of suggestions) {
         lines.push(`* [${sug.title}]: ${sug.detail}`);
       }
       lines.push('');
@@ -2528,8 +2544,8 @@ class LiveHearApp {
     return lines.join('\n');
   }
 
-  private generateTranscriptMarkdown(aiSummary = '', subtitles = this.hudState.subtitles): string {
-    const now = new Date();
+  private generateTranscriptMarkdown(aiSummary = '', subtitles = this.hudState.subtitles, metadata = this.transcriptMetadata()): string {
+    const { now, context, localAsr, suggestions } = metadata;
     const dateStr = now.toLocaleDateString();
     const timeStr = now.toLocaleTimeString();
 
@@ -2539,8 +2555,8 @@ class LiveHearApp {
 
     let md = `# LiveHear 会议速记与同传纪要\n\n`;
     md += `- **记录时间**: ${dateStr} ${timeStr}\n`;
-    md += `- **会议主题**: ${this.appConfig.meeting.context}\n`;
-    md += `- **同传引擎**: ${this.appConfig.asr_backend?.provider === 'ollama' ? 'Ollama 本地识别' : 'Soniox'}\n`;
+    md += `- **会议主题**: ${context}\n`;
+    md += `- **同传引擎**: ${localAsr ? 'Ollama 本地识别' : 'Soniox'}\n`;
     md += `- **参会发言人**: ${distinctSpeakers || '未知'}\n\n`;
 
     if (aiSummary) {
@@ -2562,9 +2578,9 @@ class LiveHearApp {
       md += `| ${item.timestamp} | ${item.speaker} | ${lang} | ${orig} | ${trans} | ${rawOrig} | ${rawTrans} | ${aiOrig} | ${aiTrans} |\n`;
     }
 
-    if (this.hudState.suggestions.length > 0) {
+    if (suggestions.length > 0) {
       md += `\n---\n\n## 智能决策与策略提炼\n\n`;
-      for (const sug of this.hudState.suggestions) {
+      for (const sug of suggestions) {
         md += `- **[${sug.title}]**: ${sug.detail}\n`;
       }
     }
@@ -2576,10 +2592,11 @@ class LiveHearApp {
 
     const saveDir = this.appConfig.storage?.save_dir || '~/Documents/livehear';
     const fileFormat = this.appConfig.storage?.file_format || 'txt';
-    const now = new Date();
+    const metadata = this.transcriptMetadata();
+    const now = metadata.now;
     const pad = (n: number) => String(n).padStart(2, '0');
     const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-    const filename = `Meeting_${ts}.${fileFormat}`;
+    const filename = `Meeting_${ts}_${String(now.getMilliseconds()).padStart(3, '0')}.${fileFormat}`;
 
     let subtitles: SubtitleItem[];
     try {
@@ -2588,10 +2605,10 @@ class LiveHearApp {
       this.showToast(`⚠️ 无法读取完整会议记录，导出已取消: ${error}`);
       return;
     }
-    const aiSummary = await this.fetchAiExecutiveSummary(subtitles);
+    const aiSummary = await this.fetchAiExecutiveSummary(subtitles, 12000);
     const content = fileFormat === 'md'
-      ? this.generateTranscriptMarkdown(aiSummary, subtitles)
-      : this.generateTranscriptText(aiSummary, subtitles);
+      ? this.generateTranscriptMarkdown(aiSummary, subtitles, metadata)
+      : this.generateTranscriptText(aiSummary, subtitles, metadata);
 
     try {
       const savedPath = await tauriInvoke<string>('save_meeting_transcript', {
@@ -2693,7 +2710,7 @@ class LiveHearApp {
   // draining can't interleave with a Start (or hot-reload) issued meanwhile.
   private lifecycleChain: Promise<unknown> = Promise.resolve();
   private pendingStop: Promise<void> | null = null;
-  private isClosing = false;
+  private pendingAutoSaves = new Set<Promise<void>>();
 
   private runLifecycle<T>(op: () => Promise<T>): Promise<T> {
     const next = this.lifecycleChain.then(op, op);
@@ -2784,57 +2801,53 @@ class LiveHearApp {
       stoppingBtn.innerHTML = `<span class="live-dot-pulse"></span><span class="live-text">正在处理尾段…</span>`;
     }
     try {
-      await tauriInvoke('stop_soniox_live');
-    } catch (error: any) {
-      stopWarning = `⚠️ 停止识别：${error?.message || error}`;
-    }
-    const polishDeadline = Date.now() + 30000;
-    await new Promise<void>((resolve) => setTimeout(resolve, 800));
-    while ((this.polishTimers.size > 0 || this.polishJobs.size > 0 || this.translatingTurnIds.size > 0) && Date.now() < polishDeadline) {
-      await Promise.race([
-        Promise.allSettled([...this.polishJobs]),
-        new Promise<void>((resolve) => setTimeout(resolve, 100)),
-      ]);
-      if (this.polishJobs.size === 0 && (this.polishTimers.size > 0 || this.translatingTurnIds.size > 0)) {
+      try {
+        await tauriInvoke('stop_soniox_live');
+      } catch (error: any) {
+        stopWarning = `⚠️ 停止识别：${error?.message || error}`;
+      }
+      const hasPendingEdits = () => this.polishTimers.size || this.polishJobs.size || this.translatingTurnIds.size;
+      const polishDeadline = Date.now() + 2000;
+      // Let queued final subtitle events reach the HUD before taking the save snapshot.
+      await new Promise<void>((resolve) => setTimeout(resolve, 800));
+      while (hasPendingEdits() && Date.now() < polishDeadline) {
         await new Promise<void>((resolve) => setTimeout(resolve, 100));
       }
-    }
-    if (this.polishTimers.size || this.polishJobs.size || this.translatingTurnIds.size) {
-      stopWarning = stopWarning || '⚠️ AI 整理尚未完成，仅保存现有字幕';
-    }
-    this.polishEpoch++;
-    this.streamEpoch++;
-    for (const timer of this.polishTimers.values()) clearTimeout(timer);
-    this.polishTimers.clear();
-    this.hudState.isStreaming = false;
-    this.coalesceMap.clear();
-    this.finalizeDanglingPartials();
-    this.updateMicVolume(0);
-    this.updateLatencyBadge(0);
-
-    const liveBtn = document.getElementById('btnToggleLive');
-    if (liveBtn) {
-      liveBtn.className = 'live-status-pill no-drag paused';
-      liveBtn.innerHTML = `<span class="live-dot-pulse"></span><span class="live-text">开始同传</span>`;
-    }
-
-    if (!triggerAutoSave) {
-      this.isStopping = false;
-      if (stoppingBtn) stoppingBtn.disabled = false;
-      if (stopWarning) this.showToast(stopWarning);
-      return;
-    }
-
-    // 会议停止时，若开启了自动保存且有字幕记录，立即自动落盘
-    try {
-      if (this.appConfig.storage?.auto_save !== false && this.hudState.subtitles.length > 0) {
-        await this.autoSaveMeetingTranscript();
-      } else {
-        this.showToast('已暂停实时语音同传');
+      if (hasPendingEdits()) {
+        stopWarning ||= '⚠️ AI 整理尚未完成，已保留现有字幕';
       }
+      this.polishEpoch++;
+      this.streamEpoch++;
+      for (const timer of this.polishTimers.values()) clearTimeout(timer);
+      this.polishTimers.clear();
+      this.polishJobs.clear();
+      this.translatingTurnIds.clear();
+      this.coalesceMap.clear();
+      this.finalizeDanglingPartials();
     } finally {
       this.isStopping = false;
+      this.hudState.isStreaming = false;
       if (stoppingBtn) stoppingBtn.disabled = false;
+      const liveBtn = document.getElementById('btnToggleLive') as HTMLButtonElement | null;
+      if (liveBtn) {
+        liveBtn.disabled = false;
+        liveBtn.className = 'live-status-pill no-drag paused';
+        liveBtn.innerHTML = `<span class="live-dot-pulse"></span><span class="live-text">开始同传</span>`;
+      }
+      this.updateMicVolume(0);
+      this.updateLatencyBadge(0);
+    }
+
+    if (triggerAutoSave) {
+      if (this.appConfig.storage?.auto_save !== false && this.hudState.subtitles.length > 0) {
+        const save = this.autoSaveMeetingTranscript().catch(error => {
+          this.showToast(`⚠️ 自动保存纪要失败: ${error?.message || error}`);
+        });
+        this.pendingAutoSaves.add(save);
+        void save.then(() => this.pendingAutoSaves.delete(save));
+      } else if (!stopWarning) {
+        this.showToast('已暂停实时语音同传');
+      }
     }
     if (stopWarning) this.showToast(stopWarning);
   }

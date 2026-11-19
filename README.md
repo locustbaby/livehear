@@ -2,7 +2,7 @@
 
 **LiveHear** 是一款基于 **Tauri v2 (Rust + TypeScript)** 构建的原生低延迟跨国会议实时双语字幕、语义纠偏与主动发言提词（Speaking Co-Pilot）悬浮 HUD 桌面端应用。
 
-它专为跨国技术评审、商务谈判、远程日常同步（Standup）与在线面试设计，结合 **Soniox `stt-rt-v5` 原生流式语音识别与同传** 与 **OpenRouter / OpenAI 兼容大模型上下文后处理**，在毫秒级延迟下提供高准确度双语字幕、说话人分离、语气感知与高情商双语接话建议。
+它专为跨国技术评审、商务谈判、远程日常同步（Standup）与在线面试设计，结合 **Soniox `stt-rt-v6` 原生流式语音识别与同传** 与 **OpenRouter / OpenAI 兼容大模型上下文后处理**，在毫秒级延迟下提供高准确度双语字幕、说话人分离、语气感知与高情商双语接话建议。
 
 ---
 
@@ -16,7 +16,7 @@
   - **自适应柔和自动增益控制（Adaptive Soft-AGC + `tanh` 软限幅）**：自动拉升远场微弱人声并防止爆音削波。
 - **零丢字智能静音门禁（VAD + 500ms 环形预卷缓冲）**：静音期仅发送 160ms 心跳静音包，为你节省 **60%~70%** 的 Soniox 流式计费；一旦检测到人声，立即回放前 500ms 预卷缓冲，确保句首辅音（如 `What / Can / Please`）绝不丢失。
 
-### 2. Soniox `stt-rt-v5` 实时双流状态机与置信度门控
+### 2. Soniox `stt-rt-v6` 实时双流状态机与置信度门控
 - **单连接双流同传**：默认使用 Soniox 中英双向互译，中文发言直接显示英文，英文发言直接显示中文。「译为 EN」可手动调用设置中的 AI 翻译模型。支持 **单向同传 (`one_way`)**（任意外语实时译为目标母语）与 **双向互译 (`two_way`)**（如中英、中泰、中日双向自动互译）。
 - **顶栏一键语种范围锁定 (`language_hints_strict`)**：点击顶栏语种胶囊即可快速切换识别语种范围（如 `中+英`、`中+英+泰`、`中+英+日` 或自定义 ISO 语种码），消除相近音素跨语种误判，提升 30%+ 识别准确率。
 - **置信度门控说话人防抖（Confidence-Gated Diarization Hysteresis）**：过滤连词、气音与置信度 `< 0.62` 的瞬态角色跳变，避免同一人说话被切碎为多个 Speaker。
@@ -137,4 +137,4 @@ LiveHear 在架构设计与交互打磨过程中，深度调研并融合了以�
 
 ## 架构与技术规范
 
-关于音频 DSP 处理链、Soniox `stt-rt-v5` 双流状态机、说话人防抖算法、LLM 双轨后处理协议、Speak 辅助状态机及 60fps 零重排 DOM 渲染架构的详细设计，请参阅 [`ARCHITECTURE.md`](file:///Users/sexy/Documents/GitHub/livehear/ARCHITECTURE.md)。
+关于音频 DSP 处理链、Soniox `stt-rt-v6` 双流状态机、说话人防抖算法、LLM 双轨后处理协议、Speak 辅助状态机及 60fps 零重排 DOM 渲染架构的详细设计，请参阅 [`ARCHITECTURE.md`](file:///Users/sexy/Documents/GitHub/livehear/ARCHITECTURE.md)。

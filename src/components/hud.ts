@@ -1177,7 +1177,12 @@ export function renderSettingsModalHtml(config: FullAppConfig, state: HudState):
                 <option value="2000" ${(config.soniox.max_endpoint_delay_ms ?? 2000) > 1600 && (config.soniox.max_endpoint_delay_ms ?? 2000) <= 2300 ? 'selected' : ''}>多人会议标准 (2000ms)</option>
                 <option value="2600" ${(config.soniox.max_endpoint_delay_ms ?? 2000) > 2300 ? 'selected' : ''}>深度长句讨论 (2600ms · 复杂从句最稳)</option>
               </select>
-              <div class="setting-tip">留足上下文窗口供 Soniox 完整理解长句语义与声纹，消除半句切碎与直译错误。</div>
+              <div class="setting-tip">语音结束后等待断句的最长时间。</div>
+              ${config.soniox.model === 'stt-rt-v6' && config.soniox.enable_endpoint_detection !== false ? `
+                <label for="cfgEndpointSensitivity" style="margin-top: 8px;">断句灵敏度</label>
+                <input type="number" id="cfgEndpointSensitivity" min="-1" max="1" step="any" value="${config.soniox.endpoint_sensitivity ?? -0.2}" />
+                <div class="setting-tip">调高会更容易断句，调低能给停顿较多的发言留出更多时间。</div>
+              ` : ''}
             </div>
 
             <div class="setting-group">

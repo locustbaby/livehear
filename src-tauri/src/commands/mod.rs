@@ -146,7 +146,7 @@ pub async fn start_soniox_live(
     if let Some(old_orch) = old
         && !old_orch.stop().await
     {
-        return Err("本地识别收尾超时，部分字幕可能未完成".into());
+        return Err("识别收尾未完成，已停止并保留已收到的字幕".into());
     }
 
     let conf = {
@@ -194,7 +194,7 @@ pub async fn stop_soniox_live(container: State<'_, Arc<AppContainer>>) -> Result
     if let Some(orch) = current
         && !orch.stop().await
     {
-        return Err("本地识别收尾超时，部分字幕可能未完成".into());
+        return Err("识别收尾未完成，已停止并保留已收到的字幕".into());
     }
     Ok(())
 }
